@@ -12,12 +12,22 @@
  ******************************************************************************/
 
 #include "rgb_lcd_port.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 
 const char *TAG = "rgb_lcd_port";
 
 // Handle for the RGB LCD panel
 static esp_lcd_panel_handle_t panel_handle = NULL; // Declare a handle for the LCD panel
+static SemaphoreHandle_t frame_done = NULL;
+
+IRAM_ATTR static bool rgb_lcd_on_frame_finish(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx)
+{
+    BaseType_t need_yield = pdFALSE;
+    if (frame_done != NULL) xSemaphoreGiveFromISR(frame_done, &need_yield);
+    return need_yield == pdTRUE;
+}
 
 /**
  * @brief Initialize the RGB LCD panel on the ESP32-S3
@@ -57,7 +67,7 @@ esp_lcd_panel_handle_t waveshare_esp32_s3_rgb_lcd_init()
         .num_fbs = EXAMPLE_LCD_RGB_BUFFER_NUMS,                  // Number of framebuffers for double/triple buffering
         .bounce_buffer_size_px = EXAMPLE_RGB_BOUNCE_BUFFER_SIZE, // Bounce buffer size in pixels
         .sram_trans_align = 4,                                   // SRAM transaction alignment in bytes
-        .psram_trans_align = 64,                                 // PSRAM transaction alignment in bytes
+        .dma_burst_size = 64,                                    // Stable burst size for PSRAM-to-internal-RAM transfers
         .hsync_gpio_num = EXAMPLE_LCD_IO_RGB_HSYNC,              // GPIO for horizontal sync signal
         .vsync_gpio_num = EXAMPLE_LCD_IO_RGB_VSYNC,              // GPIO for vertical sync signal
         .de_gpio_num = EXAMPLE_LCD_IO_RGB_DE,                    // GPIO for data enable signal
@@ -95,6 +105,17 @@ esp_lcd_panel_handle_t waveshare_esp32_s3_rgb_lcd_init()
 
     // Initialize the RGB LCD panel
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
+
+    frame_done = xSemaphoreCreateBinary();
+    ESP_ERROR_CHECK(frame_done == NULL ? ESP_ERR_NO_MEM : ESP_OK);
+    esp_lcd_rgb_panel_event_callbacks_t callbacks = {
+#if EXAMPLE_RGB_BOUNCE_BUFFER_SIZE > 0
+        .on_bounce_frame_finish = rgb_lcd_on_frame_finish,
+#else
+        .on_vsync = rgb_lcd_on_frame_finish,
+#endif
+    };
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &callbacks, NULL));
 
     // Return success status
     return panel_handle;
@@ -164,8 +185,9 @@ void wavesahre_rgb_lcd_display_window(int16_t Xstart, int16_t Ystart, int16_t Xe
  */
 void wavesahre_rgb_lcd_display(uint8_t *Image)
 {
-    // Draw the entire image on the screen
-    esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES, Image);
+    while (xSemaphoreTake(frame_done, 0) == pdTRUE) {}
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, EXAMPLE_LCD_H_RES, EXAMPLE_LCD_V_RES, Image));
+    ESP_ERROR_CHECK(xSemaphoreTake(frame_done, pdMS_TO_TICKS(250)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT);
 }
 
 void waveshare_get_frame_buffer(void **buf1, void **buf2)

@@ -1,0 +1,6 @@
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 2
+interrupt_message = true
+
+# Agent 默认继承主会话当前可用模型，避免绑定账户不可用的模型。
