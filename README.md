@@ -1,8 +1,17 @@
 # ShiYu Screen｜食愈家庭饮食终端
 
-基于 Waveshare ESP32-S3-Touch-LCD-7B 的家庭饮食信息屏原型。当前目标是验证：用户无需 TF 卡，通过手机即可把照片无线发送到屏幕，并在断电后保留。
+基于 Waveshare ESP32-S3-Touch-LCD-7B 的家庭饮食信息屏原型。当前主任务是建立 Supabase 后端，打通手机编辑家庭数据、上传照片与屏幕同步。
 
-## 当前已实现
+## 当前开发入口
+
+- `firmware/shiyu_idf/`：当前目标固件；30MHz + DOUBLE_PARTIAL 双 framebuffer 已获用户显示与切页确认。
+- `supabase/`：数据库迁移、权限策略与服务端函数骨架。
+- `web/`：手机网页端骨架，尚未实现运行页面。
+- [后端实施入口](docs/backend/README.md)：数据边界、权限和首阶段验收。
+
+后端当前仅完成仓库目录与配置模板，尚未部署。下方无线传图说明为早期 Arduino MVP 历史记录，不代表当前 IDF 的产品入口。
+
+## 历史 Arduino MVP 已实现
 
 - ESP32-S3 创建本地 Wi-Fi 热点。
 - 手机浏览器打开上传页面并从相册选图。
@@ -15,7 +24,7 @@
 - 当前显示照片会被记录，断电重启后恢复。
 - 已在真实 ESP32-S3-Touch-LCD-7B 上完成编译、烧录和无线传图验证。
 
-## 快速开始
+## 历史 Arduino MVP 快速开始
 
 Arduino 程序位于：
 
@@ -31,14 +40,14 @@ firmware/wireless_photo_display/
 
 [docs/technical-roadmap.md](docs/technical-roadmap.md)
 
-## 当前产品边界
+## 历史 Arduino MVP 产品边界
 
 - 屏幕端以信息展示为主。
 - 硬件交互限定为点击、翻页和简单滑动。
 - 食材录入等复杂操作优先由手机端完成。
-- 当前版本仅保存最后一张图片，不依赖 TF 卡、路由器或云服务。
+- 历史记录含单图与多图阶段，具体能力以目标路线源码和验收记录为准。
 
-## 当前待真机验收
+## 历史 Arduino MVP 待真机验收记录
 
 - 不同类型照片的 JPEG 色彩与方向。
 - 连续上传多张照片后的排序与自动清理。
@@ -50,7 +59,11 @@ firmware/wireless_photo_display/
 ```text
 shiyu-screen/
 ├── firmware/
-│   └── wireless_photo_display/  # 当前可烧录 MVP
+│   ├── wireless_photo_display/  # Arduino 无线传图基线
+│   ├── shiyu_lvgl/              # Arduino LVGL 原型
+│   └── shiyu_idf/               # 当前 ESP-IDF 固件
+├── supabase/                   # migrations / functions / tests
+├── web/                        # 手机网页端骨架
 ├── docs/
 │   ├── architecture.md          # 软硬件与数据流说明
 │   ├── technical-roadmap.md     # 长期 GUI 技术路线与代码设计
