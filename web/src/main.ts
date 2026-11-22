@@ -42,6 +42,7 @@ function readableError(error: unknown) {
   if (code === 'over_email_send_rate_limit' || code === 'over_request_rate_limit') return '发送过于频繁，请稍后重试。';
   if (code === 'email_address_not_authorized') return '邮件服务尚未开放此邮箱，请联系维护者配置邮件发送服务。';
   if (code === '22023') return '邀请不可用：可能已过期、已使用，或当前账号已有厨房。';
+  if (code === 'P0001') return '当前厨房已有成员、照片或设备，无法切换。原厨房和邀请均保留。';
   if (code === '42501') return '当前账号没有此操作权限。';
   if (code === 'PGRST202' || code === '42P01') return '后端接口尚未就绪，请先完成数据库迁移。';
   return '操作未完成，请检查网络后重试。';
@@ -98,7 +99,7 @@ if (!url || !key || !/^https?:\/\//.test(url) || key.startsWith('sb_secret_')) {
     if (generation !== currentGeneration) return;
     if (error) { content.replaceChildren(el('h2', '暂时无法读取厨房'), action('重试', () => void dashboard())); message(readableError(error)); return; }
     const kitchen = households?.[0];
-    content.replaceChildren(el('h2', kitchen?.name ?? '建立你的家庭厨房'), el('p', currentSession.user.email ?? '已登录', 'muted'));
+    content.replaceChildren(el('h2', kitchen?.name ?? '选择你的厨房'), el('p', currentSession.user.email ?? '已登录', 'muted'));
     const signOut = action('退出登录', () => void run(signOut, async () => {
       const { error: signOutError } = await client.auth.signOut({ scope: 'local' });
       if (signOutError) throw signOutError; message('已退出登录；待接受的邀请在本标签页保留。');
@@ -106,34 +107,46 @@ if (!url || !key || !/^https?:\/\//.test(url) || key.startsWith('sb_secret_')) {
     content.append(signOut);
     if (pendingInvite) {
       const invite = el('section', '', 'invite'); content.append(invite);
-      if (kitchen) {
-        invite.append(el('h3', '当前账号已经属于一个厨房'), el('p', '每个账号只能加入一个厨房。可以退出登录，更换账号接受邀请。'));
+      const invitationToken = pendingInvite;
+      const { data, error: previewError } = await client.rpc('preview_household_join', { p_code: invitationToken });
+      if (generation !== currentGeneration || pendingInvite !== invitationToken) return;
+      const preview = data?.[0];
+      if (previewError || invitationState(false, preview) !== 'available') {
+        invite.append(el('h3', '邀请暂不可用'), el('p', '请向家人获取新的邀请链接。'));
+        if (previewError) message(readableError(previewError));
       } else {
-        const invitationToken = pendingInvite;
-        const { data, error: previewError } = await client.rpc('preview_invitation', { p_code: invitationToken });
-        if (generation !== currentGeneration || pendingInvite !== invitationToken) return;
-        const preview = data?.[0];
-        if (previewError || invitationState(false, preview) !== 'available') {
-          invite.append(el('h3', '邀请暂不可用'), el('p', '请向家人获取新的邀请链接。'));
+        invite.append(el('h3', `加入「${preview.household_name}」`), el('p', `有效期至 ${new Date(preview.expires_at).toLocaleString('zh-CN')}`));
+        if (!preview.can_join) {
+          invite.append(el('p', '当前账号已属于一个厨房，厨房中有其他成员、照片或绑定设备时不能切换。请保留现有数据，或退出登录后更换账号。'));
         } else {
-          invite.append(el('h3', `加入「${preview.household_name}」`), el('p', `有效期至 ${new Date(preview.expires_at).toLocaleString('zh-CN')}`));
-          const accept = action('确认加入厨房', () => void run(accept, async () => {
-            const { error: acceptError } = await client.rpc('redeem_invitation', { p_code: invitationToken });
-            if (acceptError) throw acceptError;
-            clearInvite(); message('已加入厨房。'); await dashboard();
-          })); invite.append(accept);
+          if (preview.switch_required) invite.append(el('p', '当前厨房仅有你自己，且没有照片或绑定设备。确认后将删除这个空厨房及其邀请，并加入家人的厨房。'));
+          const accept = action(preview.switch_required ? '确认删除空厨房并加入' : '确认加入厨房', () => {
+            if (preview.switch_required && !confirm('确定删除当前空厨房及其邀请，并加入家人的厨房吗？此操作不能撤销。')) return;
+            void run(accept, async () => {
+              const { error: acceptError } = await client.rpc('accept_household_join', {
+                p_code: invitationToken, p_confirm_switch: preview.switch_required === true,
+              });
+              if (acceptError) throw acceptError;
+              clearInvite(); message('已加入厨房。'); await dashboard();
+            });
+          }); invite.append(accept);
         }
       }
       invite.append(action('放弃此邀请', () => { if (busy) return; clearInvite(); message(); void dashboard(); }, true));
       return;
     }
     if (!kitchen) {
+      content.append(el('p', '账号已建立。请选择创建自己的厨房，或通过家人的邀请加入已有厨房。'));
+      const choices = el('section'); const setup = el('section');
+      const createChoice = action('创建我的厨房', () => { setup.hidden = false; message(); });
+      const joinChoice = action('加入已有厨房', () => { setup.hidden = true; message('请向厨房创建者获取邀请链接，并在此浏览器打开。登录后确认即可加入。'); }, true);
+      choices.append(createChoice, joinChoice); content.append(choices, setup); setup.hidden = true;
       const form = el('form'); const name = field(form, 'kitchen-name', '厨房名称'); name.maxLength = 80;
       const create = action('创建厨房', () => void run(create, async () => {
         if (!form.reportValidity() || !name.value.trim()) { message('请填写厨房名称。'); return; }
         const { error: createError } = await client.rpc('create_household', { p_name: name.value.trim() });
         if (createError) throw createError; message('厨房已创建。'); await dashboard();
-      })); form.append(create); form.addEventListener('submit', event => { event.preventDefault(); create.click(); }); content.append(form); return;
+      })); form.append(create); form.addEventListener('submit', event => { event.preventDefault(); create.click(); }); setup.append(form); return;
     }
     const photos = el('section'); content.append(photos);
     disposePhotos = mountPhotos(photos, client, kitchen.id, currentSession.user.id,
