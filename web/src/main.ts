@@ -2,6 +2,7 @@ import { createClient, type Session } from '@supabase/supabase-js';
 import { parseInvite, buildInviteUrl, invitationState, INVITE_STORAGE_KEY } from './invitations.mjs';
 import './style.css';
 import { mountPhotos } from './photos';
+import { mountDevices } from './devices';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const url = import.meta.env.VITE_SUPABASE_URL?.trim();
@@ -152,6 +153,9 @@ if (!url || !key || !/^https?:\/\//.test(url) || key.startsWith('sb_secret_')) {
         message(copied ? '邀请链接已复制。' : '请选中下方链接并复制。');
       })); content.append(inviteButton);
     }
+    const devices = el('section'); content.append(devices);
+    mountDevices(devices, client, kitchen.owner_id === currentSession.user.id,
+      () => generation === currentGeneration && session?.user.id === currentSession.user.id);
     const { data: members, error: memberError } = await client.from('household_members').select('user_id,joined_at').order('joined_at');
     if (generation !== currentGeneration) return;
     if (memberError) { message(readableError(memberError)); return; }

@@ -1,0 +1,7 @@
+project_id = "shiyu-screen"
+
+# Each function validates its own user JWT or independent device credential.
+[functions.device-api]
+verify_jwt = false
+[functions.device-owner]
+verify_jwt = false
