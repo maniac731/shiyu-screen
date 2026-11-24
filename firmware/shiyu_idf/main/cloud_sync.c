@@ -127,10 +127,15 @@ static bool download(const char *url)
     return ok;
 }
 
+static void clock_synced(struct timeval *tv)
+{
+    (void)tv;
+    ESP_LOGI("cloud_sync", "Secure clock synchronized");
+}
 static void worker(void *arg)
 {
     (void)arg; bool enrolled=false, revoked=false, want_pair=false; time_t pairing_deadline=0; char binding_url[256]="";
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL); esp_sntp_setservername(0,"pool.ntp.org"); esp_sntp_init();
+    bool clock_started=false;
     while(true) {
         bool pair_requested=ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(15000))>0;
         want_pair = want_pair || pair_requested;
@@ -141,6 +146,14 @@ static void worker(void *arg)
         }
         if(revoked){inventory_model_connection(false,false);status("Device disabled",NULL);continue;}
         if(!online()){inventory_model_connection(false,true);status("Waiting for Wi-Fi",NULL);continue;}
+        if(!clock_started) {
+            esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0,"ntp.aliyun.com");
+            esp_sntp_setservername(1,"ntp.tencent.com");
+            esp_sntp_setservername(2,"pool.ntp.org");
+            esp_sntp_set_time_sync_notification_cb(clock_synced);
+            esp_sntp_init(); clock_started=true;
+        }
         if(time(NULL)<1700000000){status("Waiting for secure clock",NULL);continue;}
         int code=0;
         if(!enrolled){cJSON *result=request("enroll",&code);if(!result){status("Cloud unavailable - retrying",NULL);continue;}enrolled=true;cJSON_Delete(result);}

@@ -28,4 +28,4 @@
 
 网页构建及6项原有逻辑测试通过（不冒充新增库存UI测试）；设备Edge Deno类型检查通过。IDF5.5.6编译`0x22b860`，APP余28%，DIRAM141951B（41.54%）。独立低推理只读QA GO。
 
-implemented / compiled：完成。云端已部署且合成账号真实HTTP已通过；flashed、device-tested、accepted以对应测试记录更新，不用本地通过代替真实结果。
+implemented / compiled：完成。云端已部署且合成账号真实HTTP已通过；库存固件已烧录，用户已确认手机新增食材在屏幕名称/数量/单位一致。完整测试边界见 `docs/testing/2026-11-24-inventory.md`。正常校时已改为联网后启动、多公共时间源，TLS安全校验保留。，不用本地通过代替真实结果。
