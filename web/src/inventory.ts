@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-type Item = { id: string; name: string; quantity: number; unit: string; version: number };
+type Item = { id: string; name: string; quantity: number; unit: string; version: number; expires_on: string | null };
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text = '') {
   const el = document.createElement(tag); el.textContent = text; return el;
 }
@@ -12,7 +12,7 @@ function errorText(error: unknown) {
   if (code === 'P1001') return '这条库存已被修改或删除。你的输入仍保留，请刷新核对后重新编辑。';
   if (code === 'P1002') return '已有同名食材，但单位不同。请沿用现有单位，或编辑原记录；不会自动换算。';
   if (code === 'P1003') return '首版最多保存 100 条库存记录，请先整理现有库存。';
-  if (code === '23505') return '已有同名食材。新增时可累加，编辑改名不能覆盖另一条记录。';
+  if (code === '23505') return '已有同名、同单位和同到期日的批次。新增时可累加，编辑不能覆盖另一批次。';
   if (code === '42501') return '当前账号已无权访问此厨房，请重新登录确认。';
   if (code === 'PGRST202' || code === '42P01') return '库存接口尚未部署，请稍后重试。';
   if (code === '22023') return '请检查名称、数量和单位；数量最多 3 位小数。';
@@ -26,12 +26,12 @@ export function mountInventory(host: HTMLElement, client: SupabaseClient, househ
   const list = node('div'), editor = node('section'), add = node('form');
   function fields(form: HTMLElement, prefix: string, value?: Item) {
     const result: Record<string, HTMLInputElement> = {};
-    for (const [key, title] of [['name', '食材名称'], ['quantity', '数量'], ['unit', '单位']]) {
-      const input = node('input'); input.id = `${prefix}-${key}`; input.required = true;
-      input.type = key === 'quantity' ? 'number' : 'text';
+    for (const [key, title] of [['name', '食材名称'], ['quantity', '数量'], ['unit', '单位'], ['expires_on', '到期日期（可选）']]) {
+      const input = node('input'); input.id = `${prefix}-${key}`; input.required = key !== 'expires_on';
+      input.type = key === 'quantity' ? 'number' : key === 'expires_on' ? 'date' : 'text';
       if (key === 'quantity') { input.min = value ? '0' : '0.001'; input.max = '999999.999'; input.step = '0.001'; input.inputMode = 'decimal'; }
-      else input.maxLength = key === 'name' ? 40 : 8;
-      input.value = value ? String(value[key as keyof Item]) : key === 'quantity' ? '1' : '';
+      else if (key !== 'expires_on') input.maxLength = key === 'name' ? 40 : 8;
+      input.value = value ? String(value[key as keyof Item] ?? '') : key === 'quantity' ? '1' : '';
       if (key === 'unit') input.placeholder = '例如：个、克、盒';
       const label = node('label', title); label.htmlFor = input.id;
       form.append(label, input); result[key] = input;
@@ -47,7 +47,9 @@ export function mountInventory(host: HTMLElement, client: SupabaseClient, househ
         !/^\d+(\.\d{1,3})?$/.test(raw) || !Number.isFinite(quantity) || quantity < 0 || quantity > 999999.999) {
       throw { code: '22023' };
     }
-    return { p_name: name, p_quantity: quantity, p_unit: unit };
+    const expiry = inputs.expires_on.value;
+    if (expiry && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(expiry)) throw { code: '22023' };
+    return { p_name: name, p_quantity: quantity, p_unit: unit, p_expires_on: expiry || null };
   }
   async function run(task: () => Promise<void>) {
     if (!valid() || busy) return;
@@ -58,7 +60,7 @@ export function mountInventory(host: HTMLElement, client: SupabaseClient, househ
   }
   async function refresh() {
     const turn = ++sequence;
-    const { data, error } = await client.from('inventory_items').select('id,name,quantity,unit,version').eq('household_id', household).order('name_key');
+    const { data, error } = await client.from('inventory_items').select('id,name,quantity,unit,version,expires_on').eq('household_id', household).order('expires_on', { nullsFirst: false }).order('name_key');
     if (!valid() || turn !== sequence) return;
     if (error) { notice.textContent = errorText(error); return; }
     list.replaceChildren();
@@ -66,7 +68,7 @@ export function mountInventory(host: HTMLElement, client: SupabaseClient, househ
     list.append(node('p', items.length ? `共 ${items.length} 条库存记录` : '厨房库存为空，添加第一种食材吧。'));
     for (const item of items) {
       const row = node('article'); row.className = 'inventory-row';
-      row.append(node('strong', item.name), node('p', `${Number(item.quantity)} ${item.unit}`), button('编辑', () => edit(item)), button('删除', () => {
+      row.append(node('strong', item.name), node('p', `${Number(item.quantity)} ${item.unit}`), node('p', item.expires_on ? `到期：${item.expires_on}` : '未填写到期日期'), button('编辑', () => edit(item)), button('删除', () => {
         if (!confirm(`确定删除「${item.name}」这条库存吗？`)) return;
         void run(async () => {
           const { error: problem } = await client.rpc('inventory_write', { p_action: 'delete', p_item: item.id, p_version: item.version });
@@ -81,7 +83,7 @@ export function mountInventory(host: HTMLElement, client: SupabaseClient, househ
     if (!valid() || busy || (editor.childElementCount && !confirm('切换编辑会放弃未保存的输入，继续吗？'))) return;
     editor.replaceChildren(node('h4', `编辑「${item.name}」`));
     const form = node('form'), inputs = fields(form, 'inventory-edit', item);
-    form.append(node('p', '这里填写当前总量。更改单位不会自动换算，请同时核对数量。'));
+    form.append(node('p', '这里填写当前批次数量。更改单位不会自动换算，请同时核对数量。'));
     const save = node('button', '保存修改'); save.type = 'submit';
     form.append(save, button('取消编辑', () => { if (!busy) editor.replaceChildren(); }));
     form.addEventListener('submit', event => {
@@ -91,7 +93,7 @@ export function mountInventory(host: HTMLElement, client: SupabaseClient, househ
         const { error } = await client.rpc('inventory_write', { p_action: 'update', ...args, p_item: item.id, p_version: item.version });
         if (error) throw error;
         if (!valid()) return;
-        editor.replaceChildren(); await refresh(); notice.textContent = '库存总量已更新。';
+        editor.replaceChildren(); await refresh(); notice.textContent = '库存批次已更新。';
       });
     }); editor.append(form); editor.scrollIntoView({ block: 'nearest' });
   }
@@ -106,11 +108,11 @@ export function mountInventory(host: HTMLElement, client: SupabaseClient, househ
       const { error } = await client.rpc('inventory_write', { p_action: 'add', ...args, p_request: requestId });
       if (error) throw error;
       if (!valid()) return;
-      requestId = ''; requestPayload = ''; f.name.value = ''; f.quantity.value = '1';
-      await refresh(); notice.textContent = '库存已保存，同名且单位一致时已累加。';
+      requestId = ''; requestPayload = ''; f.name.value = ''; f.quantity.value = '1'; f.expires_on.value = '';
+      await refresh(); notice.textContent = '库存已保存，同名、同单位、同到期日的批次已累加。';
     });
   });
-  host.append(node('h3', '厨房库存'), node('p', '同名食材合并。新增会累加数量；首版最多 100 条记录。屏幕联网后会定期同步。'),
+  host.append(node('h3', '厨房库存'), node('p', '同名、同单位、同到期日合并；不同日期分批，无日期也单独合并。最多 100 条批次。屏幕联网后会定期同步。'),
     notice, add, button('刷新库存', () => { if (!busy) void refresh(); }), editor, list);
   void refresh();
   const timer = setInterval(() => { if (valid() && !busy && !document.hidden) void refresh(); }, 30000);

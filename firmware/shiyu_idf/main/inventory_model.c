@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stddef.h>
 #include <math.h>
 #include <time.h>
@@ -11,6 +12,23 @@
 #include "freertos/semphr.h"
 #include "nvs.h"
 
+typedef struct { char id[37], name[121], quantity[16], unit[25]; } legacy_row_t;
+typedef struct {
+    uint32_t schema, generation, count;
+    int64_t saved_at;
+    char device[37], household[37], revision[65];
+    legacy_row_t rows[INVENTORY_LIMIT];
+    uint32_t checksum;
+} legacy_snapshot_t;
+static bool date_valid(const char *s)
+{
+    if (!*s) return true;
+    if (strnlen(s,11)!=10 || s[4]!='-' || s[7]!='-') return false;
+    for(unsigned i=0;i<10;i++) if(i!=4&&i!=7&&(s[i]<'0'||s[i]>'9')) return false;
+    int y=atoi(s), m=atoi(s+5), d=atoi(s+8);
+    static const int days[]={31,28,31,30,31,30,31,31,30,31,30,31};
+    return y>=1&&m>=1&&m<=12&&d>=1&&d<=days[m-1]+(m==2&&y%4==0&&(y%100!=0||y%400==0));
+}
 typedef struct {
     uint32_t schema, generation, count;
     int64_t saved_at;
@@ -73,18 +91,39 @@ static uint32_t checksum(const snapshot_t *s)
 }
 static bool valid(const snapshot_t *s)
 {
-    if(s->schema!=1 || s->count>INVENTORY_LIMIT || s->checksum!=checksum(s) ||
+    if(s->schema!=2 || s->count>INVENTORY_LIMIT || s->checksum!=checksum(s) ||
        !uuid(s->device)||!uuid(s->household)||!hex(s->revision,64)) return false;
     for(unsigned i=0;i<s->count;++i)
         if(!uuid(s->rows[i].id)||!text(s->rows[i].name,120)||
-           !text(s->rows[i].unit,24)||!quantity(s->rows[i].quantity)) return false;
+           !text(s->rows[i].unit,24)||!quantity(s->rows[i].quantity)||
+           !date_valid(s->rows[i].expires_on)) return false;
     return true;
 }
 static bool read_slot(unsigned slot, snapshot_t *s)
 {
     FILE *f=fopen(paths[slot],"rb");
     if(!f) return false;
-    bool ok=fread(s,1,sizeof(*s),f)==sizeof(*s) && fgetc(f)==EOF && valid(s);
+    uint32_t schema=0; bool ok=false;
+    if(fread(&schema,1,sizeof(schema),f)==sizeof(schema)) {
+        rewind(f);
+        if(schema==2) ok=fread(s,1,sizeof(*s),f)==sizeof(*s)&&fgetc(f)==EOF&&valid(s);
+        else if(schema==1) {
+            legacy_snapshot_t *old=heap_caps_malloc(sizeof(*old),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+            if(old) {
+                ok=fread(old,1,sizeof(*old),f)==sizeof(*old)&&fgetc(f)==EOF;
+                uint32_t hash=2166136261U; const unsigned char *bytes=(const void *)old;
+                if(ok) for(size_t i=0;i<offsetof(legacy_snapshot_t,checksum);i++) hash=(hash^bytes[i])*16777619U;
+                ok=ok&&old->count<=INVENTORY_LIMIT&&hash==old->checksum;
+                if(ok) {
+                    memset(s,0,sizeof(*s)); s->schema=2;s->generation=old->generation;s->count=old->count;s->saved_at=old->saved_at;
+                    memcpy(s->device,old->device,sizeof(s->device));memcpy(s->household,old->household,sizeof(s->household));memcpy(s->revision,old->revision,sizeof(s->revision));
+                    for(unsigned i=0;i<s->count;i++) memcpy(&s->rows[i],&old->rows[i],sizeof(legacy_row_t));
+                    s->checksum=checksum(s);ok=valid(s);
+                }
+                free(old);
+            }
+        }
+    }
     fclose(f); return ok;
 }
 bool inventory_model_init(void)
@@ -110,7 +149,7 @@ void inventory_model_identity(const char *device)
 {
     xSemaphoreTake(s_lock,portMAX_DELAY);
     strlcpy(s_device,device,sizeof(s_device));
-    s_available=s_data->schema==1 && !strcmp(s_data->device,s_device);
+    s_available=s_data->schema==2 && !strcmp(s_data->device,s_device);
     s_serial++;
     xSemaphoreGive(s_lock);
 }
@@ -128,19 +167,41 @@ void inventory_model_revision(char revision[65])
     strlcpy(revision,s_available?s_data->revision:"",65);
     xSemaphoreGive(s_lock);
 }
+static bool same_group(const inventory_row_t *a,const inventory_row_t *b)
+{ return !strcasecmp(a->name,b->name)&&!strcmp(a->unit,b->unit); }
+static int expiry_compare(const char *a,const char *b)
+{ return !*a?(!*b?0:1):!*b?-1:strcmp(a,b); }
+static unsigned grouped(inventory_row_t *out,unsigned start,unsigned capacity)
+{
+    unsigned order[INVENTORY_LIMIT], count=0;
+    if(!s_available) return 0;
+    for(unsigned i=0;i<s_data->count;i++) {
+        unsigned j=0;for(;j<count;j++) if(same_group(&s_data->rows[i],&s_data->rows[order[j]])) break;
+        if(j==count) order[count++]=i;
+        else if(expiry_compare(s_data->rows[i].expires_on,s_data->rows[order[j]].expires_on)<0) order[j]=i;
+    }
+    for(unsigned i=1;i<count;i++) { unsigned key=order[i],j=i;
+        while(j&&expiry_compare(s_data->rows[key].expires_on,s_data->rows[order[j-1]].expires_on)<0) {order[j]=order[j-1];j--;}order[j]=key;
+    }
+    for(unsigned k=start;out&&k<count&&k-start<capacity;k++) {
+        inventory_row_t *r=&out[k-start];*r=s_data->rows[order[k]];r->batches=0;uint64_t milli=0;
+        for(unsigned i=0;i<s_data->count;i++) if(same_group(r,&s_data->rows[i])) {r->batches++;milli+=(uint64_t)llround(strtod(s_data->rows[i].quantity,NULL)*1000);}
+        snprintf(r->quantity,sizeof(r->quantity),"%u.%03u",(unsigned)(milli/1000),(unsigned)(milli%1000));
+    }
+    return count;
+}
 bool inventory_model_meta(unsigned *count, bool *online, unsigned *serial)
 {
     xSemaphoreTake(s_lock,portMAX_DELAY);
-    bool known=s_available && s_data->schema==1;
-    *count=known?s_data->count:0; *online=s_online && time(NULL)-s_contact<90;
+    bool known=s_available && s_data->schema==2;
+    *count=known?grouped(NULL,0,0):0; *online=s_online && time(NULL)-s_contact<90;
     *serial=s_serial;
     xSemaphoreGive(s_lock); return known;
 }
 bool inventory_model_row(unsigned index, inventory_row_t *row)
 {
     xSemaphoreTake(s_lock,portMAX_DELAY);
-    bool ok=s_available&&index<s_data->count;
-    if(ok) *row=s_data->rows[index];
+    bool ok=index<grouped(row,index,1);
     xSemaphoreGive(s_lock); return ok;
 }
 bool inventory_model_accept(const cJSON *json)
@@ -158,16 +219,24 @@ bool inventory_model_accept(const cJSON *json)
     if(!cJSON_IsArray(items)||cJSON_GetArraySize(items)>INVENTORY_LIMIT) return false;
     snapshot_t *next=heap_caps_calloc(1,sizeof(*next),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(!next) return false;
-    next->schema=1; next->generation=s_data->generation+1;
-    next->saved_at=time(NULL);
+    next->schema=2;
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    next->generation=s_data->generation+1;
     strlcpy(next->device,s_device,sizeof(next->device));
+    xSemaphoreGive(s_lock);
+    next->saved_at=time(NULL);
     strlcpy(next->household,household,sizeof(next->household));
     strlcpy(next->revision,revision,sizeof(next->revision));
     const cJSON *entry; bool ok=true;
     cJSON_ArrayForEach(entry,items) {
         const char *id=str(entry,"id"),*name=str(entry,"name"),*qty=str(entry,"quantity"),*unit=str(entry,"unit");
         if(!uuid(id)||!text(name,120)||!quantity(qty)||!text(unit,24)) { ok=false; break; }
+        const cJSON *expiry=cJSON_GetObjectItemCaseSensitive(entry,"expires_on");
+        if(expiry&&!cJSON_IsNull(expiry)&&!cJSON_IsString(expiry)) {ok=false;break;}
+        const char *date=cJSON_IsString(expiry)?expiry->valuestring:"";
+        if((cJSON_IsString(expiry)&&!*date)||!date_valid(date)) {ok=false;break;}
         inventory_row_t *r=&next->rows[next->count++];
+        strlcpy(r->expires_on,date,sizeof(r->expires_on));
         strlcpy(r->id,id,sizeof(r->id)); strlcpy(r->name,name,sizeof(r->name));
         strlcpy(r->quantity,qty,sizeof(r->quantity)); strlcpy(r->unit,unit,sizeof(r->unit));
     }
@@ -194,10 +263,9 @@ bool inventory_model_accept(const cJSON *json)
 unsigned inventory_model_page(unsigned start, inventory_row_t *rows, unsigned capacity, unsigned *total)
 {
     xSemaphoreTake(s_lock,portMAX_DELAY);
-    *total=s_available?s_data->count:0;
+    *total=grouped(rows,start,capacity);
     unsigned count=start<*total?*total-start:0;
     if(count>capacity) count=capacity;
-    if(count) memcpy(rows,&s_data->rows[start],count*sizeof(*rows));
     xSemaphoreGive(s_lock); return count;
 }
 bool inventory_model_find(const char *id, inventory_row_t *row)
@@ -207,4 +275,23 @@ bool inventory_model_find(const char *id, inventory_row_t *row)
         *row=s_data->rows[i]; found=true; break;
     }
     xSemaphoreGive(s_lock); return found;
+}
+
+unsigned inventory_model_batches(const char *id,inventory_row_t *rows,unsigned capacity)
+{
+    xSemaphoreTake(s_lock,portMAX_DELAY);const inventory_row_t *selected=NULL;
+    for(unsigned i=0;s_available&&i<s_data->count;i++) if(!strcmp(id,s_data->rows[i].id)) {selected=&s_data->rows[i];break;}
+    unsigned n=0;
+    for(unsigned i=0;selected&&i<s_data->count&&n<capacity;i++) if(same_group(selected,&s_data->rows[i])) rows[n++]=s_data->rows[i];
+    for(unsigned i=1;i<n;i++) {inventory_row_t key=rows[i];unsigned j=i;while(j&&expiry_compare(key.expires_on,rows[j-1].expires_on)<0) {rows[j]=rows[j-1];j--;}rows[j]=key;}
+    xSemaphoreGive(s_lock);return n;
+}
+
+unsigned inventory_model_group_batches(const char *name,const char *unit,inventory_row_t *rows,unsigned capacity)
+{
+    inventory_row_t key={0};strlcpy(key.name,name,sizeof(key.name));strlcpy(key.unit,unit,sizeof(key.unit));
+    xSemaphoreTake(s_lock,portMAX_DELAY);unsigned n=0;
+    for(unsigned i=0;s_available&&i<s_data->count&&n<capacity;i++) if(same_group(&key,&s_data->rows[i])) rows[n++]=s_data->rows[i];
+    for(unsigned i=1;i<n;i++) {inventory_row_t current=rows[i];unsigned j=i;while(j&&expiry_compare(current.expires_on,rows[j-1].expires_on)<0) {rows[j]=rows[j-1];j--;}rows[j]=current;}
+    xSemaphoreGive(s_lock);return n;
 }

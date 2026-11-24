@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -131,10 +132,13 @@ typedef struct {
 
 static const char *TAG = "shiyu_ui";
 static ui_state_t s_ui;
-static lv_obj_t *s_stock_count, *s_stock_list, *s_stock_page_label;
+static lv_obj_t *s_stock_count, *s_stock_list, *s_stock_page_label, *s_stock_previous, *s_stock_next;
 static inventory_row_t *s_stock_rows;
+static inventory_row_t *s_detail_rows;
 static unsigned s_stock_page, s_stock_rows_count;
-static char s_stock_selected[37];
+static lv_obj_t *s_home_names[4], *s_home_quantities[4], *s_home_status, *s_home_clock, *s_home_date;
+#define STOCK_PAGE_SIZE 6U
+static char s_stock_selected_name[121], s_stock_selected_unit[25];
 static void refresh_inventory_ui(bool force);
 
 static bool special_keyboard_contains(char character)
@@ -317,7 +321,7 @@ static void release_transient_screen(active_screen_t screen)
             s_ui.inventory = NULL;
             s_ui.inventory_context = NULL;
             s_ui.inventory_milk = NULL;
-            s_stock_list = NULL; s_stock_page_label = NULL;
+            s_stock_list = NULL; s_stock_page_label = NULL; s_stock_previous=NULL; s_stock_next=NULL;
             break;
         case SCREEN_FOOD_DETAIL:
             object = s_ui.food_detail;
@@ -445,15 +449,11 @@ static void on_food_detail(lv_event_t *event)
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
     unsigned index=(unsigned)(uintptr_t)lv_event_get_user_data(event);
     if (!s_stock_rows || index>=s_stock_rows_count) return;
-    strlcpy(s_stock_selected,s_stock_rows[index].id,sizeof(s_stock_selected));
+    strlcpy(s_stock_selected_name,s_stock_rows[index].name,sizeof(s_stock_selected_name));
+    strlcpy(s_stock_selected_unit,s_stock_rows[index].unit,sizeof(s_stock_selected_unit));
     ensure_active_screen(SCREEN_FOOD_DETAIL);
     refresh_inventory_ui(true);
     show_active(SCREEN_FOOD_DETAIL);
-}
-
-static void on_meal(lv_event_t *event)
-{
-    if (lv_event_get_code(event) == LV_EVENT_CLICKED) show_active(SCREEN_MEAL);
 }
 
 static void on_ambient(lv_event_t *event)
@@ -610,7 +610,15 @@ static void on_state_timer(lv_timer_t *timer)
 {
     LV_UNUSED(timer);
     refresh_inventory_ui(false);
-    if(s_carousel_status){int result=s_carousel_save_requested?carousel_settings_result():0;lv_label_set_text(s_carousel_status,result==2?"Saving...":result==1?"Saved":result<0?"Save failed - old value kept":"5-300 seconds; tap Save");}
+    static time_t shown_minute=-1;
+    time_t now=time(NULL);
+    if(s_home_clock && now>=1700000000 && now/60!=shown_minute) {
+        shown_minute=now/60;
+        time_t china_time=now+8*3600; struct tm local; gmtime_r(&china_time,&local);
+        char text[48];strftime(text,sizeof(text),"%H:%M",&local);lv_label_set_text(s_home_clock,text);
+        snprintf(text,sizeof(text),"%d月%d日",local.tm_mon+1,local.tm_mday);lv_label_set_text(s_home_date,text);
+    }
+    if(s_carousel_status && s_carousel_save_requested){int result=carousel_settings_result();lv_label_set_text(s_carousel_status,result==2?"正在保存":result==1?"已保存":result<0?"保存失败，保留原设置":"请输入 5–300 秒，点击保存生效");}
     if(s_ui.mode==MODE_AMBIENT&&photo_storage_count()>=2&&lv_tick_elaps(s_carousel_tick)>=carousel_settings_seconds()*1000){char path[64];if(photo_storage_snapshot(path,sizeof(path),true)) {
         shiyu_ui_set_ambient_photo(path);
         ESP_LOGI(TAG, "Carousel advanced: %u photos, %us", photo_storage_count(), carousel_settings_seconds());
@@ -625,37 +633,29 @@ static void create_home(void)
 {
     s_ui.home = lv_obj_create(NULL);
     prepare_screen(s_ui.home, SHIYU_COLOR_BACKGROUND);
-    make_label(s_ui.home, "食愈", 48, 36, SHIYU_COLOR_SECONDARY, UI_FONT_TITLE);
-    make_label(s_ui.home, "一眼看懂家里的食材", 48, 79, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    make_label(s_ui.home, "", 680, 79,
-               SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    lv_obj_t *settings = make_button(s_ui.home, 852, 32, 132, 56,
-                                     SHIYU_COLOR_SURFACE, "设置");
-    lv_obj_add_event_cb(settings, on_settings, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *meal = make_card(s_ui.home, 48, 150, 574, 330, SHIYU_COLOR_SURFACE);
-    lv_obj_add_flag(meal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(meal, on_meal, LV_EVENT_CLICKED, NULL);
-    make_label(meal, "今晚吃什么", 32, 28, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(meal, "番茄炒蛋", 32, 84, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(meal, "配一碗热米饭", 32, 125, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    make_label(meal, "[DEMO] 示例菜单，未接入库存匹配", 32, 198, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    lv_obj_t *meal_button = make_button(meal, 32, 252, 220, 46,
-                                        SHIYU_COLOR_ACCENT, "查看建议");
-    lv_obj_add_event_cb(meal_button, on_meal, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *expiry = make_card(s_ui.home, 650, 150, 326, 214, SHIYU_COLOR_WARNING);
-
-    make_label(expiry, "临期提醒", 28, 26, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(expiry, "未开启", 28, 76, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(expiry, "本阶段只管理数量", 28, 138, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-
-    lv_obj_t *inventory = make_card(s_ui.home, 650, 388, 326, 92, SHIYU_COLOR_ACCENT);
-    lv_obj_add_flag(inventory, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(inventory, on_inventory, LV_EVENT_CLICKED, NULL);
-    s_stock_count = make_label(inventory, "库存尚未同步", 24, 32, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    make_label(s_ui.home, "60 秒无操作后进入环境模式", 48, 542,
-               SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
+    make_label(s_ui.home, "食愈", 36, 33, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
+    s_home_status=make_label(s_ui.home,"等待同步",640,44,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    lv_obj_t *button=make_button(s_ui.home,928,24,60,60,SHIYU_COLOR_SURFACE,LV_SYMBOL_SETTINGS);
+    lv_obj_add_event_cb(button,on_settings,LV_EVENT_CLICKED,NULL);
+    lv_obj_t *stock=make_card(s_ui.home,36,102,608,434,SHIYU_COLOR_SURFACE);
+    make_label(stock,"厨房库存",24,22,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    s_stock_count=make_label(stock,"—",420,22,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    for(unsigned i=0;i<4;++i) {
+        s_home_names[i]=make_label(stock,"",24,86+i*65,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+        lv_obj_set_width(s_home_names[i],220); lv_label_set_long_mode(s_home_names[i],LV_LABEL_LONG_DOT);
+        s_home_quantities[i]=make_label(stock,"",246,86+i*65,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+        lv_obj_set_size(s_home_quantities[i],338,60);lv_obj_set_style_text_align(s_home_quantities[i],LV_TEXT_ALIGN_RIGHT,0);
+        lv_label_set_long_mode(s_home_quantities[i],LV_LABEL_LONG_DOT);
+    }
+    button=make_button(stock,16,356,576,62,SHIYU_COLOR_ACCENT,"查看全部  >");
+    lv_obj_add_event_cb(button,on_inventory,LV_EVENT_CLICKED,NULL);
+    lv_obj_t *clock=make_card(s_ui.home,668,102,320,206,0xE9EDDF);
+    s_home_clock=make_label(clock,"--:--",32,36,SHIYU_COLOR_PRIMARY,&lv_font_montserrat_48);
+    s_home_date=make_label(clock,"等待网络校时",24,132,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    lv_obj_t *hint=make_card(s_ui.home,668,328,320,208,SHIYU_COLOR_ACCENT);
+    make_label(hint,"手机记录，家人共享",24,30,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    make_label(hint,"添加食材、调整数量\n都在手机完成",24,94,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    make_label(s_ui.home,"轻触查看库存 · 片刻后回到照片",36,556,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
 }
 
 static void stock_page_change(lv_event_t *event)
@@ -663,7 +663,7 @@ static void stock_page_change(lv_event_t *event)
     int step=(int)(intptr_t)lv_event_get_user_data(event);
     unsigned count, serial; bool online;
     inventory_model_meta(&count,&online,&serial);
-    unsigned pages=(count+3)/4;
+    unsigned pages=(count+STOCK_PAGE_SIZE-1)/STOCK_PAGE_SIZE;
     if(step<0 && s_stock_page) --s_stock_page;
     if(step>0 && s_stock_page+1<pages) ++s_stock_page;
     refresh_inventory_ui(true);
@@ -671,7 +671,7 @@ static void stock_page_change(lv_event_t *event)
 
 static void stock_quantity(char *out, size_t capacity, const inventory_row_t *row)
 {
-    char number[16]; strlcpy(number,row->quantity,sizeof(number));
+    char number[sizeof(row->quantity)]; strlcpy(number,row->quantity,sizeof(number));
     if(strchr(number,'.')) {
         size_t n=strlen(number);
         while(n && number[n-1]=='0') number[--n]=0;
@@ -680,41 +680,91 @@ static void stock_quantity(char *out, size_t capacity, const inventory_row_t *ro
     snprintf(out,capacity,"%s %s",number,row->unit);
 }
 
+static const char *stock_expiry_status(const char *date,time_t day)
+{
+    if(!*date) return "未填日期";
+    if(day<0) return "";
+    int y=atoi(date),m=atoi(date+5),d=atoi(date+8);
+    y-=m<=2;int era=y/400;unsigned yoe=(unsigned)(y-era*400);
+    unsigned doy=(153*(m+(m>2?-3:9))+2)/5+d-1;
+    int64_t target=(int64_t)era*146097+yoe*365+yoe/4-yoe/100+doy-719468;
+    int64_t remaining=target-day;
+    return remaining<0?"已过填写日期":remaining==0?"今天到期":remaining<=3?"临近到期":"";
+}
+static void stock_date_line(char *out,size_t capacity,const inventory_row_t *row,time_t day)
+{
+    const char *status=stock_expiry_status(row->expires_on,day);
+    snprintf(out,capacity,"%s%s%s",*row->expires_on?row->expires_on:"",*row->expires_on&&*status?" · ":"",status);
+}
+
 static void refresh_inventory_ui(bool force)
 {
     static unsigned previous=~0U; static bool was_online, was_known;
+    static time_t previous_day=-1;
+    time_t now=time(NULL);
+    time_t day=now>=1704067200?(now+8*3600)/86400:-1;
     unsigned count, serial; bool online;
     bool known=inventory_model_meta(&count,&online,&serial);
-    if(!force && previous==serial && was_online==online && was_known==known) return;
+    if(!force && previous==serial && was_online==online && was_known==known && previous_day==day) return;
+    previous_day=day;
     previous=serial; was_online=online; was_known=known;
     if(s_stock_count) {
-        if(known) lv_label_set_text_fmt(s_stock_count,"库存记录 %u 条",count);
-        else lv_label_set_text(s_stock_count,"库存尚未同步");
+        if(known) lv_label_set_text_fmt(s_stock_count,"%u 种",count);
+        else lv_label_set_text(s_stock_count,"—");
+        lv_label_set_text(s_home_status,!known?"等待库存同步":online?"已同步":"离线 · 上次库存");
+        inventory_row_t preview; char quantity[160];
+        for(unsigned i=0;i<4;++i) {
+            bool found=known && inventory_model_row(i,&preview);
+            lv_label_set_text(s_home_names[i],found?preview.name:i==0?(known?"暂无食材，请在手机添加":"等待厨房库存同步"):"");
+            if(found) {stock_quantity(quantity,sizeof(quantity),&preview);
+                if(preview.batches>1) {size_t used=strlen(quantity);snprintf(quantity+used,sizeof(quantity)-used," · %u 批",preview.batches);}}
+            if(found) {size_t used=strlen(quantity);quantity[used++]='\n';stock_date_line(quantity+used,sizeof(quantity)-used,&preview,day);}
+            lv_label_set_text(s_home_quantities[i],found?quantity:"");
+        }
     }
     if(s_ui.inventory && s_stock_list && s_stock_rows) {
         lv_label_set_text(s_ui.inventory_context,!known?"尚未同步，请先联网并绑定厨房":
                           online?"已同步 · 请在手机管理食材":"离线缓存 · 请在手机管理食材");
-        if(s_stock_page*4>=count) s_stock_page=0;
-        s_stock_rows_count=inventory_model_page(s_stock_page*4,s_stock_rows,4,&count);
+        if(s_stock_page*STOCK_PAGE_SIZE>=count) s_stock_page=0;
+        s_stock_rows_count=inventory_model_page(s_stock_page*STOCK_PAGE_SIZE,s_stock_rows,STOCK_PAGE_SIZE,&count);
         lv_obj_clean(s_stock_list);
         if(!s_stock_rows_count) make_label(s_stock_list,known?"暂无食材，请在手机添加":"等待厨房库存同步",20,32,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
         for(unsigned i=0;i<s_stock_rows_count;++i) {
-            lv_obj_t *card=make_card(s_stock_list,(i%2)*476,(i/2)*128,452,112,SHIYU_COLOR_SURFACE);
+            lv_obj_t *card=make_card(s_stock_list,0,i*66,952,62,SHIYU_COLOR_SURFACE);
             lv_obj_add_flag(card,LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(card,on_food_detail,LV_EVENT_CLICKED,(void *)(uintptr_t)i);
-            lv_obj_t *name=make_label(card,s_stock_rows[i].name,20,14,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
-            lv_obj_set_width(name,408); lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);
-            char qty[64]; stock_quantity(qty,sizeof(qty),&s_stock_rows[i]);
-            make_label(card,qty,20,62,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+            lv_obj_t *name=make_label(card,s_stock_rows[i].name,24,18,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+            if(s_stock_rows[i].batches>1) lv_label_set_text_fmt(name,"%s · %u 批",s_stock_rows[i].name,s_stock_rows[i].batches);
+            lv_obj_set_width(name,430); lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);
+            char qty[160]; stock_quantity(qty,sizeof(qty),&s_stock_rows[i]);
+            size_t used=strlen(qty);qty[used++]='\n';stock_date_line(qty+used,sizeof(qty)-used,&s_stock_rows[i],day);
+            lv_obj_t *value=make_label(card,qty,474,2,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+            lv_obj_set_size(value,454,58);lv_obj_set_style_text_align(value,LV_TEXT_ALIGN_RIGHT,0);lv_label_set_long_mode(value,LV_LABEL_LONG_DOT);
         }
-        lv_label_set_text_fmt(s_stock_page_label,"%u / %u",s_stock_page+1,count?(count+3)/4:1);
+        if(s_stock_page==0) lv_obj_add_state(s_stock_previous,LV_STATE_DISABLED); else lv_obj_remove_state(s_stock_previous,LV_STATE_DISABLED);
+        if((s_stock_page+1)*STOCK_PAGE_SIZE>=count) lv_obj_add_state(s_stock_next,LV_STATE_DISABLED); else lv_obj_remove_state(s_stock_next,LV_STATE_DISABLED);
+        lv_label_set_text_fmt(s_stock_page_label,"%u / %u",s_stock_page+1,count?(count+STOCK_PAGE_SIZE-1)/STOCK_PAGE_SIZE:1);
     }
     if(s_ui.food_detail) {
-        inventory_row_t row; char qty[64];
-        if(inventory_model_find(s_stock_selected,&row)) {
-            lv_label_set_text(s_ui.food_detail_name,row.name);
-            stock_quantity(qty,sizeof(qty),&row); lv_label_set_text(s_ui.food_detail_quantity,qty);
-            lv_label_set_text(s_ui.food_detail_status,online?"已同步 · 屏幕只读":"离线缓存 · 屏幕只读");
+        if(!s_detail_rows) s_detail_rows=heap_caps_calloc(INVENTORY_LIMIT,sizeof(*s_detail_rows),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+        unsigned batches=s_detail_rows?inventory_model_group_batches(s_stock_selected_name,s_stock_selected_unit,s_detail_rows,INVENTORY_LIMIT):0;
+        if(batches || !s_detail_rows) {
+            lv_label_set_text(s_ui.food_detail_name,batches?s_detail_rows[0].name:s_stock_selected_name);
+            size_t capacity=(size_t)batches*140+80;
+            char *body=heap_caps_calloc(capacity,1,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+            if(body) {
+                size_t used=0;
+                for(unsigned i=0;i<batches;i++) {
+                    inventory_row_t *batch=&s_detail_rows[i];char qty[64];stock_quantity(qty,sizeof(qty),batch);
+                    const char *status=stock_expiry_status(batch->expires_on,day);
+                    int written=snprintf(body+used,capacity-used,"第 %u 批 · %s\n%s%s%s\n\n",i+1,qty,*batch->expires_on?batch->expires_on:"",*batch->expires_on&&*status?" · ":"",status);
+                    if(written<0||(size_t)written>=capacity-used) break;
+                    used+=(size_t)written;
+                }
+                if(!batches) strlcpy(body,"暂时无法载入批次",capacity);
+                lv_label_set_text(s_ui.food_detail_quantity,body);free(body);
+            } else lv_label_set_text(s_ui.food_detail_quantity,"内存不足，请返回重试");
+            lv_label_set_text(s_ui.food_detail_status,online?"已同步 · 按填写日期提示":"离线缓存 · 按填写日期提示");
         } else {
             lv_label_set_text(s_ui.food_detail_name,"食材已删除或尚未同步");
             lv_label_set_text(s_ui.food_detail_quantity,""); lv_label_set_text(s_ui.food_detail_status,"");
@@ -726,51 +776,42 @@ static void create_inventory(void)
 {
     s_ui.inventory=lv_obj_create(NULL);
     prepare_screen(s_ui.inventory,SHIYU_COLOR_BACKGROUND);
-    lv_obj_t *back=make_button(s_ui.inventory,40,32,132,56,SHIYU_COLOR_SURFACE,"<  返回");
+    lv_obj_t *back=make_button(s_ui.inventory,36,24,60,60,SHIYU_COLOR_SURFACE,LV_SYMBOL_LEFT);
     lv_obj_add_event_cb(back,on_back_home,LV_EVENT_CLICKED,NULL);
-    make_label(s_ui.inventory,"家里的食材",48,124,SHIYU_COLOR_PRIMARY,UI_FONT_TITLE);
-    s_ui.inventory_context=make_label(s_ui.inventory,"等待同步",48,174,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    make_label(s_ui.inventory,"厨房库存",116,40,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    s_ui.inventory_context=make_label(s_ui.inventory,"等待同步",390,40,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
     s_stock_list=lv_obj_create(s_ui.inventory);
-    lv_obj_set_pos(s_stock_list,48,218); lv_obj_set_size(s_stock_list,928,258);
+    lv_obj_set_pos(s_stock_list,36,102); lv_obj_set_size(s_stock_list,952,396);
     lv_obj_set_style_pad_all(s_stock_list,0,0); lv_obj_set_style_border_width(s_stock_list,0,0);
     lv_obj_set_style_bg_opa(s_stock_list,LV_OPA_TRANSP,0); lv_obj_remove_flag(s_stock_list,LV_OBJ_FLAG_SCROLLABLE);
-    if(!s_stock_rows) s_stock_rows=heap_caps_calloc(4,sizeof(*s_stock_rows),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-    lv_obj_t *previous=make_button(s_ui.inventory,48,504,160,52,SHIYU_COLOR_SURFACE,"<");
-    lv_obj_add_event_cb(previous,stock_page_change,LV_EVENT_CLICKED,(void *)(intptr_t)-1);
-    s_stock_page_label=make_label(s_ui.inventory,"1 / 1",460,516,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
-    lv_obj_t *next=make_button(s_ui.inventory,816,504,160,52,SHIYU_COLOR_SURFACE,">");
-    lv_obj_add_event_cb(next,stock_page_change,LV_EVENT_CLICKED,(void *)(intptr_t)1);
+    if(!s_stock_rows) s_stock_rows=heap_caps_calloc(STOCK_PAGE_SIZE,sizeof(*s_stock_rows),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    s_stock_previous=make_button(s_ui.inventory,36,520,170,56,SHIYU_COLOR_SURFACE,"<  上一页");
+    lv_obj_add_event_cb(s_stock_previous,stock_page_change,LV_EVENT_CLICKED,(void *)(intptr_t)-1);
+    s_stock_page_label=make_label(s_ui.inventory,"1 / 1",460,534,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    s_stock_next=make_button(s_ui.inventory,818,520,170,56,SHIYU_COLOR_SURFACE,"下一页  >");
+    lv_obj_add_event_cb(s_stock_next,stock_page_change,LV_EVENT_CLICKED,(void *)(intptr_t)1);
     refresh_inventory_ui(true);
 }
 
 static void create_food_detail(void)
 {
-    s_ui.food_detail = lv_obj_create(NULL);
-    prepare_screen(s_ui.food_detail, SHIYU_COLOR_BACKGROUND);
-    lv_obj_t *back = make_button(s_ui.food_detail, 40, 32, 132, 56,
-                                 SHIYU_COLOR_SURFACE, "<  返回");
-    lv_obj_add_event_cb(back, on_back_inventory, LV_EVENT_CLICKED, NULL);
-    make_label(s_ui.food_detail, "家里的食材", 48, 124,
-               SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-
-    lv_obj_t *detail = make_card(s_ui.food_detail, 48, 194, 928, 240,
-                                 SHIYU_COLOR_SURFACE);
-    s_ui.food_detail_name = make_label(detail, "", 32, 28,
-                                       SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    lv_obj_set_width(s_ui.food_detail_name,850);
-    s_ui.food_detail_quantity = make_label(detail, "", 32, 112,
-                                           SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    s_ui.food_detail_status = make_label(detail, "", 32, 174,
-                                         SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    make_label(detail, "手机管理食材", 636, 174, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-
-    lv_obj_t *meal_button = make_button(s_ui.food_detail, 48, 470, 260, 58,
-                                        SHIYU_COLOR_ACCENT, "今晚吃什么");
-    lv_obj_add_event_cb(meal_button, on_meal, LV_EVENT_CLICKED, NULL);
-    make_label(s_ui.food_detail, "60 秒无操作后进入环境模式", 570, 486,
-               SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    ESP_LOGI(TAG, "Created transient FOOD_DETAIL");
-    log_memory("food-detail-created");
+    s_ui.food_detail=lv_obj_create(NULL);
+    prepare_screen(s_ui.food_detail,SHIYU_COLOR_BACKGROUND);
+    lv_obj_t *back=make_button(s_ui.food_detail,36,24,60,60,SHIYU_COLOR_SURFACE,LV_SYMBOL_LEFT);
+    lv_obj_add_event_cb(back,on_back_inventory,LV_EVENT_CLICKED,NULL);
+    make_label(s_ui.food_detail,"食材详情",116,40,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    lv_obj_t *detail=make_card(s_ui.food_detail,36,102,952,366,SHIYU_COLOR_SURFACE);
+    s_ui.food_detail_name=make_label(detail,"",36,32,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    lv_obj_set_size(s_ui.food_detail_name,880,44);lv_label_set_long_mode(s_ui.food_detail_name,LV_LABEL_LONG_DOT);
+    lv_obj_t *batch_scroll=lv_obj_create(detail);
+    lv_obj_set_pos(batch_scroll,20,90);lv_obj_set_size(batch_scroll,910,210);
+    lv_obj_set_style_bg_opa(batch_scroll,LV_OPA_TRANSP,0);lv_obj_set_style_border_width(batch_scroll,0,0);
+    lv_obj_set_scroll_dir(batch_scroll,LV_DIR_VER);
+    lv_obj_set_style_pad_all(batch_scroll,0,0);
+    s_ui.food_detail_quantity=make_label(batch_scroll,"",8,8,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    lv_obj_set_width(s_ui.food_detail_quantity,880);
+    s_ui.food_detail_status=make_label(detail,"",36,318,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    make_label(s_ui.food_detail,"需要调整数量？请在手机厨房中编辑。",60,514,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
 }
 
 static void create_meal(void)
@@ -843,43 +884,126 @@ static void on_cloud_open(lv_event_t *event)
     make_label(s_cloud_screen, "Use kitchen owner phone. QR expires in 10 minutes.", 48, 548, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
     lv_screen_load(s_cloud_screen); cloud_sync_request_pairing();
 }
-static void carousel_back(lv_event_t *e){(void)e;lv_screen_load(s_ui.settings);lv_obj_delete(s_carousel_screen);s_carousel_screen=NULL;s_carousel_status=NULL;s_carousel_value=NULL;}
-static void carousel_adjust(lv_event_t *e){s_carousel_save_requested=false;int delta=(int)(intptr_t)lv_event_get_user_data(e);int value=(int)s_carousel_draft+delta;if(value>=5&&value<=300)s_carousel_draft=value;lv_label_set_text_fmt(s_carousel_value,"%u seconds",s_carousel_draft);}
-static void carousel_save(lv_event_t *e){(void)e;if(carousel_settings_save(s_carousel_draft))s_carousel_save_requested=true;else lv_label_set_text(s_carousel_status,"Save unavailable - retry");}
-static void carousel_open(lv_event_t *e){(void)e;s_carousel_save_requested=false;s_carousel_draft=carousel_settings_seconds();s_carousel_screen=lv_obj_create(NULL);prepare_screen(s_carousel_screen,SHIYU_COLOR_BACKGROUND);lv_obj_t *b=make_button(s_carousel_screen,40,32,180,56,SHIYU_COLOR_SURFACE,"< Back");lv_obj_add_event_cb(b,carousel_back,LV_EVENT_CLICKED,NULL);make_label(s_carousel_screen,"Photo carousel",80,140,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);s_carousel_value=make_label(s_carousel_screen,"",380,260,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);lv_label_set_text_fmt(s_carousel_value,"%u seconds",s_carousel_draft);b=make_button(s_carousel_screen,200,240,120,80,SHIYU_COLOR_SURFACE,"-");lv_obj_add_event_cb(b,carousel_adjust,LV_EVENT_CLICKED,(void*)(intptr_t)-1);b=make_button(s_carousel_screen,650,240,120,80,SHIYU_COLOR_SURFACE,"+");lv_obj_add_event_cb(b,carousel_adjust,LV_EVENT_CLICKED,(void*)(intptr_t)1);b=make_button(s_carousel_screen,380,380,220,70,SHIYU_COLOR_ACCENT,"Save");lv_obj_add_event_cb(b,carousel_save,LV_EVENT_CLICKED,NULL);s_carousel_status=make_label(s_carousel_screen,"5-300 seconds; tap Save",280,490,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);lv_screen_load(s_carousel_screen);}
+static void carousel_back(lv_event_t *event)
+{
+    (void)event;
+    lv_screen_load(s_ui.settings);
+    lv_obj_delete(s_carousel_screen);
+    s_carousel_screen=NULL; s_carousel_status=NULL; s_carousel_value=NULL;
+    s_carousel_save_requested=false;
+}
+
+static void carousel_input_changed(lv_event_t *event)
+{
+    (void)event;
+    s_carousel_save_requested=false;
+    if(s_carousel_status) lv_label_set_text(s_carousel_status,"请输入 5–300 秒，点击保存生效");
+}
+
+static bool carousel_read_value(void)
+{
+    const char *text=lv_textarea_get_text(s_carousel_value);
+    unsigned value=0;
+    if(!text[0]) return false;
+    for(const char *p=text;*p;++p) {
+        if(*p<'0'||*p>'9') return false;
+        value=value*10+(unsigned)(*p-'0');
+        if(value>300) return false;
+    }
+    if(value<5) return false;
+    s_carousel_draft=value;
+    return true;
+}
+
+static void carousel_adjust(lv_event_t *event)
+{
+    if(!carousel_read_value()) {
+        lv_label_set_text(s_carousel_status,"请输入 5–300 秒");
+        return;
+    }
+    int value=(int)s_carousel_draft+(int)(intptr_t)lv_event_get_user_data(event);
+    if(value<5||value>300) return;
+    char text[8];snprintf(text,sizeof(text),"%d",value);
+    lv_textarea_set_text(s_carousel_value,text);
+}
+
+static void carousel_save(lv_event_t *event)
+{
+    (void)event;
+    s_carousel_save_requested=false;
+    if(!carousel_read_value()) {
+        lv_label_set_text(s_carousel_status,"请输入 5–300 秒");
+        return;
+    }
+    if(carousel_settings_save(s_carousel_draft)) s_carousel_save_requested=true;
+    else lv_label_set_text(s_carousel_status,"暂时无法保存，请重试");
+}
+
+static void carousel_open(lv_event_t *event)
+{
+    (void)event;
+    if(s_carousel_screen) return;
+    s_carousel_save_requested=false;
+    s_carousel_draft=carousel_settings_seconds();
+    s_carousel_screen=lv_obj_create(NULL);
+    prepare_screen(s_carousel_screen,SHIYU_COLOR_BACKGROUND);
+    lv_obj_t *button=make_button(s_carousel_screen,36,24,60,60,SHIYU_COLOR_SURFACE,LV_SYMBOL_LEFT);
+    lv_obj_add_event_cb(button,carousel_back,LV_EVENT_CLICKED,NULL);
+    make_label(s_carousel_screen,"照片轮播",116,40,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    make_label(s_carousel_screen,"每张照片展示的秒数",36,112,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    s_carousel_value=lv_textarea_create(s_carousel_screen);
+    lv_obj_set_pos(s_carousel_value,380,154);lv_obj_set_size(s_carousel_value,220,64);
+    lv_textarea_set_one_line(s_carousel_value,true);
+    lv_textarea_set_accepted_chars(s_carousel_value,"0123456789");
+    lv_textarea_set_max_length(s_carousel_value,3);
+    lv_obj_set_style_text_font(s_carousel_value,UI_FONT_BODY,0);
+    lv_obj_set_style_text_align(s_carousel_value,LV_TEXT_ALIGN_CENTER,0);
+    char text[8];snprintf(text,sizeof(text),"%u",s_carousel_draft);
+    lv_textarea_set_text(s_carousel_value,text);
+    lv_obj_add_event_cb(s_carousel_value,carousel_input_changed,LV_EVENT_VALUE_CHANGED,NULL);
+    button=make_button(s_carousel_screen,270,154,80,64,SHIYU_COLOR_SURFACE,"-");
+    lv_obj_add_event_cb(button,carousel_adjust,LV_EVENT_CLICKED,(void *)(intptr_t)-1);
+    button=make_button(s_carousel_screen,630,154,80,64,SHIYU_COLOR_SURFACE,"+");
+    lv_obj_add_event_cb(button,carousel_adjust,LV_EVENT_CLICKED,(void *)(intptr_t)1);
+    s_carousel_status=make_label(s_carousel_screen,"请输入 5–300 秒，点击保存生效",36,266,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    button=make_button(s_carousel_screen,778,246,210,60,SHIYU_COLOR_ACCENT,"保存");
+    lv_obj_add_event_cb(button,carousel_save,LV_EVENT_CLICKED,NULL);
+    lv_obj_t *keyboard=lv_keyboard_create(s_carousel_screen);
+    static const char *const number_map[]={"1","2","3","\n","4","5","6","\n","7","8","9","\n",LV_SYMBOL_BACKSPACE,"0",LV_SYMBOL_OK,""};
+    static const lv_buttonmatrix_ctrl_t number_controls[]={1,1,1,1,1,1,1,1,1,1,1,1};
+    lv_keyboard_set_map(keyboard,LV_KEYBOARD_MODE_NUMBER,number_map,number_controls);
+    lv_keyboard_set_mode(keyboard,LV_KEYBOARD_MODE_NUMBER);
+    lv_obj_add_event_cb(keyboard,carousel_save,LV_EVENT_READY,NULL);
+    lv_keyboard_set_textarea(keyboard,s_carousel_value);
+    lv_obj_set_size(keyboard,LV_PCT(100),250);
+    lv_obj_align(keyboard,LV_ALIGN_BOTTOM_MID,0,0);
+    lv_obj_set_style_text_font(keyboard,UI_FONT_BODY,LV_PART_ITEMS);
+    lv_screen_load(s_carousel_screen);
+}
 
 static void create_settings(void)
 {
-    s_ui.settings = lv_obj_create(NULL);
-    prepare_screen(s_ui.settings, SHIYU_COLOR_BACKGROUND);
-    lv_obj_t *back = make_button(s_ui.settings, 40, 32, 132, 56,
-                                 SHIYU_COLOR_SURFACE, "<  返回");
-    lv_obj_add_event_cb(back, on_back_home, LV_EVENT_CLICKED, NULL);
-    make_label(s_ui.settings, "设置", 48, 124, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(s_ui.settings, "网络与屏幕", 48, 174, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-
-    lv_obj_t *network = make_card(s_ui.settings, 48, 210, 928, 120, SHIYU_COLOR_ACCENT);
-    make_label(network, "网络", 28, 22, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    s_ui.settings_network_status = make_label(network, "正在检查网络", 28, 64,
-                                              SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    lv_obj_t *network_button = make_button(network, 700, 30, 180, 58,
-                                           SHIYU_COLOR_SURFACE, "配置网络");
-    lv_obj_add_event_cb(network_button, on_network_setup, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *ambient = make_card(s_ui.settings, 48, 350, 450, 120, SHIYU_COLOR_SURFACE);
-    make_label(ambient, "环境模式", 28, 20, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(ambient, "60 秒无操作后进入", 28, 62, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(ambient, "已开启", 354, 45, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-
-    lv_obj_t *night = make_card(s_ui.settings, 522, 350, 454, 120, SHIYU_COLOR_SURFACE);
-    make_label(night, "夜间息屏 [PLANNED]", 28, 20, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(night, "23:00  -  07:00", 28, 62,
-               SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(night, "下一项", 354, 45, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    lv_obj_t *cloud = make_button(s_ui.settings, 48, 506, 360, 62, SHIYU_COLOR_ACCENT, "Cloud / Bind screen");
-    lv_obj_add_event_cb(cloud, on_cloud_open, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *carousel=make_button(s_ui.settings,440,506,360,62,SHIYU_COLOR_SURFACE,"Photo carousel");
-    lv_obj_add_event_cb(carousel,carousel_open,LV_EVENT_CLICKED,NULL);
+    s_ui.settings=lv_obj_create(NULL);
+    prepare_screen(s_ui.settings,SHIYU_COLOR_BACKGROUND);
+    lv_obj_t *back=make_button(s_ui.settings,36,24,60,60,SHIYU_COLOR_SURFACE,LV_SYMBOL_LEFT);
+    lv_obj_add_event_cb(back,on_back_home,LV_EVENT_CLICKED,NULL);
+    make_label(s_ui.settings,"设置",116,40,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    lv_obj_t *network=make_card(s_ui.settings,36,102,952,128,SHIYU_COLOR_SURFACE);
+    make_label(network,"网络连接",24,20,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    s_ui.settings_network_status=make_label(network,"正在检查网络",24,68,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    lv_obj_set_width(s_ui.settings_network_status,640);lv_label_set_long_mode(s_ui.settings_network_status,LV_LABEL_LONG_DOT);
+    lv_obj_t *button=make_button(network,730,34,194,60,SHIYU_COLOR_ACCENT,"配置网络  >");
+    lv_obj_add_event_cb(button,on_network_setup,LV_EVENT_CLICKED,NULL);
+    lv_obj_t *carousel=make_card(s_ui.settings,36,250,952,128,SHIYU_COLOR_SURFACE);
+    make_label(carousel,"照片轮播",24,20,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    make_label(carousel,"60 秒无操作后展示照片",24,68,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    button=make_button(carousel,730,34,194,60,SHIYU_COLOR_ACCENT,"设置间隔  >");
+    lv_obj_add_event_cb(button,carousel_open,LV_EVENT_CLICKED,NULL);
+    lv_obj_t *cloud=make_card(s_ui.settings,36,398,952,128,SHIYU_COLOR_SURFACE);
+    make_label(cloud,"设备与厨房",24,20,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+    make_label(cloud,"查看云端连接与设备绑定",24,68,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    button=make_button(cloud,730,34,194,60,SHIYU_COLOR_ACCENT,"查看状态  >");
+    lv_obj_add_event_cb(button,on_cloud_open,LV_EVENT_CLICKED,NULL);
 }
 
 static void create_ambient(void)
@@ -893,7 +1017,7 @@ static void create_ambient(void)
                                     SHIYU_COLOR_WHITE, UI_FONT_TITLE);
     s_ui.ambient_hint = make_label(s_ui.ambient, "轻触任意位置打开食愈", 48, 478,
                                    0xDCE8DE, UI_FONT_BODY);
-    make_label(s_ui.ambient, "环境模式", 48, 42, SHIYU_COLOR_WHITE, UI_FONT_BODY);
+
 
     lv_obj_t *touch_layer = lv_obj_create(s_ui.ambient);
     lv_obj_set_size(touch_layer, LV_PCT(100), LV_PCT(100));
