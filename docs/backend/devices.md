@@ -23,6 +23,36 @@
 
 撤销表示永久禁用当前设备凭据，不能通过enroll自行复活；不是“换厨房”完整流程。解除后的重配/恢复出厂需另外设计，当前UI明确叫“停用屏幕同步”。旧缓存不自动清理，已签发URL最长120秒有效。
 
-固件已接入：CA/hostname/SNTP；流式下载<=1MiB；不自动跨域跳转；下载时不携带设备secret；释放TLS后使用esp_new_jpeg逐block完整解码验证1024x600（EOI/输出行数）；A/B文件槽+NVS指针，候选失败保旧图；挂载失败不format；日志不打印凭据。首次身份保存在cloud_device namespace的单一blob，照片有效指针在cloud_photo namespace。旧current.jpg保留为迁移前缓存。UI设置新增Cloud / Bind screen入口（英文以复用已有字体），首次打开才生成绑定码；断网/校时未完成会等待并重试。
+固件已接入：CA/hostname/SNTP；流式下载<=1MiB；不自动跨域跳转；下载时不携带设备secret；释放TLS后使用esp_new_jpeg逐block完整解码验证1024x600（EOI/输出行数）；A/B文件槽+NVS指针，候选失败保旧图；挂载失败不format；日志不打印凭据。首次身份保存在cloud_device namespace的单一blob，照片有效指针在cloud_photo namespace。旧热点传图入口已移除；启动删除旧 current.jpg/upload.tmp，仅使用云端 A/B 缓存与 cloud.tmp 临时文件，原 FATFS 分区不变。UI设置新增Cloud / Bind screen入口（英文以复用已有字体），首次打开才生成绑定码；断网/校时未完成会等待并重试。
 
 mbedTLS分配策略从internal切为external：当前internal largest约14.8KB不足默认TLS16KB输入，PSRAM承载TLS，网络请求结束先释放连接再JPEG校验；TLS峰值仍须实测，不能用PSRAM总余量代替。代码不改变PCLK/framebuffer/bounce/PSRAM频率或分区。已实现重试间隔15秒，未做大规模生产调度；首次注册与QR/图片同步必须云端部署与QA通过后再烧录。
+
+### Device album carousel (implemented; deployment/device acceptance pending)
+
+`device-api` adds `album` and `photo_url` while retaining legacy `manifest`.
+`album` uses the service-role-only `device_album` RPC: device secret hash, bound
+kitchen and revocation are checked each call. It returns at most 20 photos in
+`created_at DESC, id DESC` order, with `total`/`truncated`. `bytes` comes from
+Storage metadata (missing metadata is `null`, never client input). `photo_url`
+accepts one `photo_id`, rechecks kitchen ownership and returns a 120-second URL.
+No list-wide URL signing; firmware retains its 4096-byte JSON response bound.
+
+Firmware caches immutable UUID JPEG files, validates every 1024×600 JPEG by
+block decoding, then commits a checksummed generation catalog in alternate NVS
+slots before publishing it. Startup validates both catalogs and can recover the
+other generation. FAT rename is **not** claimed power-loss atomic. Existing
+valid `cloud0/1` cache is copied and retained during migration. Empty cloud
+lists and network failures retain valid local photos. Cache limits are 20
+photos, 1 MiB each, 8 MiB managed JPEG bytes, including retained legacy files;
+download is serial through one temporary file with capacity reserved first.
+Cleanup conservatively protects both recovery catalogs and current/recent
+image decoder sources. At high occupancy, replacement may pause with
+`Cache full - keeping local photos`; full-cache replacement is not yet an
+accepted behavior. No second full decoded album is held in memory.
+
+Local rotation runs only while ambient mode is visible and at least two photos
+exist, independent of HTTP. Ambient entry restarts the timer. Settings → Photo
+carousel permits 5–300 seconds in one-second steps (default 10); Save delegates
+NVS to a worker and changes the active interval only after successful commit.
+A failed save keeps the prior interval and reports failure. The English labels
+reuse current fonts without changing the font artifacts.

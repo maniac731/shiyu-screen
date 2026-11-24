@@ -32,6 +32,17 @@
 
 ## RGB 屏幕稳定性参数
 
+### 当前 ESP-IDF 真机确认基线（2026-11-20）
+
+- 适用路线：`firmware/shiyu_idf`。PCLK 固定采用 **30MHz**；用户确认 18MHz 及此前尝试的其他频率存在轻微抖动，当前 30MHz 显示恢复正常。这是当前硬件和配置组合的验收结论。
+- 面板与 adapter 均显式使用 `DOUBLE_PARTIAL`（mode 6），**两块 framebuffer**；用户确认切页流畅。
+- 保留 20 行 bounce buffer、64B DMA burst、50 行 partial draw buffer、120MHz OPI PSRAM。
+- 三 framebuffer 曾导致环境 JPEG 的 1,228,800B 对齐输出缓冲分配失败；改双 framebuffer 后，黑条消失，resident PSRAM free 约 3.87MB。随后仅恢复 30MHz，用户确认轻微抖动消失。
+- 此组合为已确认技术基线；没有明确故障证据及受控验证理由，不得随意更改 PCLK、framebuffer 数量或渲染模式。后续更改须说明相对基线的单变量、回退点与真机验收结果。
+- 已通过当前照片显示和切页的人工观察；长时间耐久、完整冷启动及断网矩阵仍未全部完成。
+
+### 历史 Arduino 路线参数（不作为当前 IDF 默认值）
+
 真机观察到 Wi-Fi 工作、Flash 读写和 JPEG 解码期间出现画面漂移。原因是 RGB LCD 持续扫描与这些任务共享 PSRAM/Flash 总线带宽。当前稳定性配置为：
 
 - 像素时钟从官方示例的 30MHz 降至 18MHz。真机验证 12MHz 会让面板在静止状态下也出现抖动，因此不采用。

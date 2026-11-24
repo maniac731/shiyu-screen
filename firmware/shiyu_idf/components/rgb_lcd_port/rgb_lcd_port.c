@@ -19,7 +19,10 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lv_adapter_tear_avoid_mode_t tear_
 
     const uint8_t num_fbs = esp_lv_adapter_get_required_frame_buffer_count(tear_mode, rotation);
 
-    ESP_LOGI(TAG, "Install RGB LCD panel driver");
+    ESP_LOGI(TAG,
+             "Install RGB LCD panel driver: pclk=%uHz tear_mode=%d framebuffers=%u bounce_lines=%u",
+             (unsigned)EXAMPLE_LCD_PIXEL_CLOCK_HZ, (int)tear_mode,
+             (unsigned)num_fbs, (unsigned)EXAMPLE_RGB_BOUNCE_BUFFER_LINES);
     esp_lcd_rgb_panel_config_t panel_config = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
