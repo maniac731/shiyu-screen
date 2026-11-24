@@ -3,8 +3,15 @@ Deno.serve(async req=>{
  if(req.method==='OPTIONS')return reply({});
  try {
   const b=await body(req); const id=req.headers.get('x-device-id')??'', secret=req.headers.get('x-device-secret')??'';
-  if(!uuid(id)||!token(secret)||!['enroll','pairing','status','manifest','album','photo_url'].includes(b.action))return reply({error:'invalid request'},400);
+  if(!uuid(id)||!token(secret)||!['enroll','pairing','status','manifest','album','photo_url','inventory'].includes(b.action))return reply({error:'invalid request'},400);
   const client=admin();
+  if(b.action==='inventory'){
+   const known=typeof b.known_revision==='string'&&/^[0-9a-f]{64}$/.test(b.known_revision)?b.known_revision:'';
+   const {data,error}=await client.rpc('device_inventory',{p_device:id,p_hash:await hash(secret),p_known:known});
+   if(error)return reply({error:'inventory unavailable'},error.code==='54000'?413:403);
+   if(new TextEncoder().encode(JSON.stringify(data)).length>65536)return reply({error:'inventory too large'},413);
+   return reply(data);
+  }
   if(b.action==='album'||b.action==='photo_url'){
    if(b.action==='photo_url'&&!uuid(b.photo_id??''))return reply({error:'invalid photo'},400);
    const {data,error}=await client.rpc('device_album',{p_device:id,p_hash:await hash(secret),p_photo:b.action==='photo_url'?b.photo_id:null});

@@ -1,6 +1,7 @@
 #include "cloud_sync.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include "esp_random.h"
 #include "esp_heap_caps.h"
@@ -16,6 +17,7 @@
 #include "freertos/idf_additions.h"
 #include "cJSON.h"
 #include "photo_storage.h"
+#include "inventory_model.h"
 #include "ui_controller.h"
 
 #define API "https://lkewydexsjjntydpbzri.supabase.co/functions/v1/device-api"
@@ -68,22 +70,24 @@ static esp_http_client_handle_t client(const char *url)
 static cJSON *request_photo(const char *action, const char *photo_id, int *http_status)
 {
     char body[128];
-    snprintf(body, sizeof(body), "{\"action\":\"%s\",\"photo_id\":\"%s\"}", action, photo_id ? photo_id : "");
+    snprintf(body, sizeof(body), "{\"action\":\"%s\",\"%s\":\"%s\"}", action,
+             !strcmp(action,"inventory")?"known_revision":"photo_id", photo_id ? photo_id : "");
     esp_http_client_handle_t http = client(API);
     if (!http) return NULL;
     esp_http_client_set_method(http, HTTP_METHOD_POST);
     esp_http_client_set_header(http, "Content-Type", "application/json");
     esp_http_client_set_header(http, "X-Device-Id", s_credentials.id);
     esp_http_client_set_header(http, "X-Device-Secret", s_credentials.secret);
-    char *response = heap_caps_malloc(4097, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const int limit = !strcmp(action,"inventory") ? INVENTORY_RESPONSE_MAX : 4096;
+    char *response = heap_caps_malloc(limit+1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     memory("before-api");
     cJSON *json = NULL;
     if (response && esp_http_client_open(http, strlen(body)) == ESP_OK &&
         esp_http_client_write(http, body, strlen(body)) == (int)strlen(body) && esp_http_client_fetch_headers(http) >= 0) {
         *http_status = esp_http_client_get_status_code(http);
         int used=0, n=0;
-        while (used < 4096 && (n=esp_http_client_read(http,response+used,4096-used)) > 0) used+=n;
-        if (*http_status == 200 && used < 4096 && n >= 0 && esp_http_client_is_complete_data_received(http)) {
+        while (used < limit && (n=esp_http_client_read(http,response+used,limit-used)) > 0) used+=n;
+        if (*http_status == 200 && used < limit && n >= 0 && esp_http_client_is_complete_data_received(http)) {
             response[used]=0; json=cJSON_Parse(response);
         }
     }
@@ -135,8 +139,8 @@ static void worker(void *arg)
             want_pair = true;
             status("QR expired - waiting for refresh",NULL);
         }
-        if(revoked){status("Device disabled",NULL);continue;}
-        if(!online()){status("Waiting for Wi-Fi",NULL);continue;}
+        if(revoked){inventory_model_connection(false,false);status("Device disabled",NULL);continue;}
+        if(!online()){inventory_model_connection(false,true);status("Waiting for Wi-Fi",NULL);continue;}
         if(time(NULL)<1700000000){status("Waiting for secure clock",NULL);continue;}
         int code=0;
         if(!enrolled){cJSON *result=request("enroll",&code);if(!result){status("Cloud unavailable - retrying",NULL);continue;}enrolled=true;cJSON_Delete(result);}
@@ -144,6 +148,7 @@ static void worker(void *arg)
         if(!state){if(code==403){revoked=true;status("Device disabled",NULL);}else status("Cloud unavailable - retrying",NULL);continue;}
         bool bound=!strcmp(string(state,"state"),"bound");cJSON_Delete(state);
         if(!bound){
+            inventory_model_connection(false,false);
             if(want_pair) {
                 binding_url[0] = 0;
                 status("Preparing fresh QR",NULL);
@@ -159,6 +164,10 @@ static void worker(void *arg)
             status(binding_url[0]?"Scan with kitchen owner phone":want_pair?"Waiting for fresh QR - retrying":"Open Cloud in Settings to bind",binding_url[0]?binding_url:NULL);continue;
         }
         binding_url[0]=0;status("Kitchen bound - syncing",NULL);
+        char revision[65]; inventory_model_revision(revision);
+        cJSON *stock=request_photo("inventory",revision,&code);
+        if(!stock || !inventory_model_accept(stock)) inventory_model_connection(false,true);
+        cJSON_Delete(stock);
         cJSON *manifest=request("album",&code);
         if(!manifest){status("Sync unavailable - keeping photos",NULL);continue;}
         cJSON *photos=cJSON_GetObjectItemCaseSensitive(manifest,"photos");
@@ -183,8 +192,16 @@ static void worker(void *arg)
         cJSON_Delete(manifest);
     }
 }
+static void *json_alloc(size_t bytes)
+{
+    return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
 esp_err_t cloud_sync_init(void)
 {
+    /* Hundreds of small inventory JSON nodes must not consume internal Wi-Fi RAM.
+       Configure once before the only JSON/network worker is started. */
+    cJSON_Hooks hooks = {.malloc_fn=json_alloc, .free_fn=free};
+    cJSON_InitHooks(&hooks);
     nvs_handle_t nvs;esp_err_t err=nvs_open("cloud_device",NVS_READWRITE,&nvs);if(err!=ESP_OK)return err;
     size_t size=sizeof(s_credentials);err=nvs_get_blob(nvs,"identity",&s_credentials,&size);
     if(err==ESP_ERR_NVS_NOT_FOUND) {
@@ -196,5 +213,6 @@ esp_err_t cloud_sync_init(void)
         err=nvs_set_blob(nvs,"identity",&s_credentials,sizeof(s_credentials));if(err==ESP_OK)err=nvs_commit(nvs);
     }else if(err==ESP_OK && (size!=sizeof(s_credentials)||s_credentials.version!=1||s_credentials.id[36]||s_credentials.secret[64]))err=ESP_ERR_INVALID_STATE;
     nvs_close(nvs);if(err!=ESP_OK)return err;
+    inventory_model_identity(s_credentials.id);
     return xTaskCreateWithCaps(worker,"cloud_sync",8192,NULL,3,&s_task,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)==pdPASS?ESP_OK:ESP_ERR_NO_MEM;
 }

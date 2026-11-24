@@ -2,6 +2,7 @@
 #include "cloud_sync.h"
 #include "photo_storage.h"
 #include "carousel_settings.h"
+#include "inventory_model.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -93,11 +94,6 @@ typedef enum {
     SCREEN_SETTINGS,
     SCREEN_NETWORK,
 } active_screen_t;
-typedef enum { FOOD_TOMATO, FOOD_MILK } food_item_t;
-
-static const food_item_t FOOD_ITEM_TOMATO = FOOD_TOMATO;
-static const food_item_t FOOD_ITEM_MILK = FOOD_MILK;
-
 typedef struct {
     app_mode_t mode;
     active_screen_t active_screen;
@@ -135,6 +131,11 @@ typedef struct {
 
 static const char *TAG = "shiyu_ui";
 static ui_state_t s_ui;
+static lv_obj_t *s_stock_count, *s_stock_list, *s_stock_page_label;
+static inventory_row_t *s_stock_rows;
+static unsigned s_stock_page, s_stock_rows_count;
+static char s_stock_selected[37];
+static void refresh_inventory_ui(bool force);
 
 static bool special_keyboard_contains(char character)
 {
@@ -316,6 +317,7 @@ static void release_transient_screen(active_screen_t screen)
             s_ui.inventory = NULL;
             s_ui.inventory_context = NULL;
             s_ui.inventory_milk = NULL;
+            s_stock_list = NULL; s_stock_page_label = NULL;
             break;
         case SCREEN_FOOD_DETAIL:
             object = s_ui.food_detail;
@@ -426,19 +428,10 @@ static void on_back_inventory(lv_event_t *event)
 
 static void show_inventory(bool expiry_only)
 {
-    s_ui.inventory_expiry_only = expiry_only;
+    (void)expiry_only;
+    s_ui.inventory_expiry_only = false;
     ensure_active_screen(SCREEN_INVENTORY);
-    if (s_ui.inventory_context != NULL) {
-        lv_label_set_text(s_ui.inventory_context,
-                          expiry_only ? "查看临期食材 [DEMO]" : "查看家里的食材 [DEMO]");
-    }
-    if (s_ui.inventory_milk != NULL) {
-        if (expiry_only) {
-            lv_obj_add_flag(s_ui.inventory_milk, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(s_ui.inventory_milk, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
+    refresh_inventory_ui(true);
     show_active(SCREEN_INVENTORY);
 }
 
@@ -447,25 +440,14 @@ static void on_inventory(lv_event_t *event)
     if (lv_event_get_code(event) == LV_EVENT_CLICKED) show_inventory(false);
 }
 
-static void on_expiry(lv_event_t *event)
-{
-    if (lv_event_get_code(event) == LV_EVENT_CLICKED) show_inventory(true);
-}
-
 static void on_food_detail(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+    unsigned index=(unsigned)(uintptr_t)lv_event_get_user_data(event);
+    if (!s_stock_rows || index>=s_stock_rows_count) return;
+    strlcpy(s_stock_selected,s_stock_rows[index].id,sizeof(s_stock_selected));
     ensure_active_screen(SCREEN_FOOD_DETAIL);
-    const food_item_t *item = lv_event_get_user_data(event);
-    if (item != NULL && *item == FOOD_MILK) {
-        lv_label_set_text(s_ui.food_detail_name, "牛奶");
-        lv_label_set_text(s_ui.food_detail_quantity, "已有 1");
-        lv_label_set_text(s_ui.food_detail_status, "已保存");
-    } else {
-        lv_label_set_text(s_ui.food_detail_name, "番茄");
-        lv_label_set_text(s_ui.food_detail_quantity, "已有 3");
-        lv_label_set_text(s_ui.food_detail_status, "临期提醒");
-    }
+    refresh_inventory_ui(true);
     show_active(SCREEN_FOOD_DETAIL);
 }
 
@@ -627,6 +609,7 @@ static void on_password_back(lv_event_t *event)
 static void on_state_timer(lv_timer_t *timer)
 {
     LV_UNUSED(timer);
+    refresh_inventory_ui(false);
     if(s_carousel_status){int result=s_carousel_save_requested?carousel_settings_result():0;lv_label_set_text(s_carousel_status,result==2?"Saving...":result==1?"Saved":result<0?"Save failed - old value kept":"5-300 seconds; tap Save");}
     if(s_ui.mode==MODE_AMBIENT&&photo_storage_count()>=2&&lv_tick_elaps(s_carousel_tick)>=carousel_settings_seconds()*1000){char path[64];if(photo_storage_snapshot(path,sizeof(path),true)) {
         shiyu_ui_set_ambient_photo(path);
@@ -644,7 +627,7 @@ static void create_home(void)
     prepare_screen(s_ui.home, SHIYU_COLOR_BACKGROUND);
     make_label(s_ui.home, "食愈", 48, 36, SHIYU_COLOR_SECONDARY, UI_FONT_TITLE);
     make_label(s_ui.home, "一眼看懂家里的食材", 48, 79, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    make_label(s_ui.home, "[DEMO] 此页面", 680, 79,
+    make_label(s_ui.home, "", 680, 79,
                SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
     lv_obj_t *settings = make_button(s_ui.home, 852, 32, 132, 56,
                                      SHIYU_COLOR_SURFACE, "设置");
@@ -656,65 +639,108 @@ static void create_home(void)
     make_label(meal, "今晚吃什么", 32, 28, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
     make_label(meal, "番茄炒蛋", 32, 84, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
     make_label(meal, "配一碗热米饭", 32, 125, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    make_label(meal, "家中已有 3 种所需食材", 32, 198, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
+    make_label(meal, "[DEMO] 示例菜单，未接入库存匹配", 32, 198, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
     lv_obj_t *meal_button = make_button(meal, 32, 252, 220, 46,
                                         SHIYU_COLOR_ACCENT, "查看建议");
     lv_obj_add_event_cb(meal_button, on_meal, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *expiry = make_card(s_ui.home, 650, 150, 326, 214, SHIYU_COLOR_WARNING);
-    lv_obj_add_flag(expiry, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(expiry, on_expiry, LV_EVENT_CLICKED, NULL);
+
     make_label(expiry, "临期提醒", 28, 26, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(expiry, "2 种食材", 28, 76, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(expiry, "牛奶、番茄", 28, 138, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
+    make_label(expiry, "未开启", 28, 76, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
+    make_label(expiry, "本阶段只管理数量", 28, 138, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
 
     lv_obj_t *inventory = make_card(s_ui.home, 650, 388, 326, 92, SHIYU_COLOR_ACCENT);
     lv_obj_add_flag(inventory, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(inventory, on_inventory, LV_EVENT_CLICKED, NULL);
-    make_label(inventory, "家中共有 18 种食材", 24, 32, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
+    s_stock_count = make_label(inventory, "库存尚未同步", 24, 32, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
     make_label(s_ui.home, "60 秒无操作后进入环境模式", 48, 542,
                SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
 }
 
+static void stock_page_change(lv_event_t *event)
+{
+    int step=(int)(intptr_t)lv_event_get_user_data(event);
+    unsigned count, serial; bool online;
+    inventory_model_meta(&count,&online,&serial);
+    unsigned pages=(count+3)/4;
+    if(step<0 && s_stock_page) --s_stock_page;
+    if(step>0 && s_stock_page+1<pages) ++s_stock_page;
+    refresh_inventory_ui(true);
+}
+
+static void stock_quantity(char *out, size_t capacity, const inventory_row_t *row)
+{
+    char number[16]; strlcpy(number,row->quantity,sizeof(number));
+    if(strchr(number,'.')) {
+        size_t n=strlen(number);
+        while(n && number[n-1]=='0') number[--n]=0;
+        if(n && number[n-1]=='.') number[--n]=0;
+    }
+    snprintf(out,capacity,"%s %s",number,row->unit);
+}
+
+static void refresh_inventory_ui(bool force)
+{
+    static unsigned previous=~0U; static bool was_online, was_known;
+    unsigned count, serial; bool online;
+    bool known=inventory_model_meta(&count,&online,&serial);
+    if(!force && previous==serial && was_online==online && was_known==known) return;
+    previous=serial; was_online=online; was_known=known;
+    if(s_stock_count) {
+        if(known) lv_label_set_text_fmt(s_stock_count,"库存记录 %u 条",count);
+        else lv_label_set_text(s_stock_count,"库存尚未同步");
+    }
+    if(s_ui.inventory && s_stock_list && s_stock_rows) {
+        lv_label_set_text(s_ui.inventory_context,!known?"尚未同步，请先联网并绑定厨房":
+                          online?"已同步 · 请在手机管理食材":"离线缓存 · 请在手机管理食材");
+        if(s_stock_page*4>=count) s_stock_page=0;
+        s_stock_rows_count=inventory_model_page(s_stock_page*4,s_stock_rows,4,&count);
+        lv_obj_clean(s_stock_list);
+        if(!s_stock_rows_count) make_label(s_stock_list,known?"暂无食材，请在手机添加":"等待厨房库存同步",20,32,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+        for(unsigned i=0;i<s_stock_rows_count;++i) {
+            lv_obj_t *card=make_card(s_stock_list,(i%2)*476,(i/2)*128,452,112,SHIYU_COLOR_SURFACE);
+            lv_obj_add_flag(card,LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(card,on_food_detail,LV_EVENT_CLICKED,(void *)(uintptr_t)i);
+            lv_obj_t *name=make_label(card,s_stock_rows[i].name,20,14,SHIYU_COLOR_PRIMARY,UI_FONT_BODY);
+            lv_obj_set_width(name,408); lv_label_set_long_mode(name,LV_LABEL_LONG_DOT);
+            char qty[64]; stock_quantity(qty,sizeof(qty),&s_stock_rows[i]);
+            make_label(card,qty,20,62,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+        }
+        lv_label_set_text_fmt(s_stock_page_label,"%u / %u",s_stock_page+1,count?(count+3)/4:1);
+    }
+    if(s_ui.food_detail) {
+        inventory_row_t row; char qty[64];
+        if(inventory_model_find(s_stock_selected,&row)) {
+            lv_label_set_text(s_ui.food_detail_name,row.name);
+            stock_quantity(qty,sizeof(qty),&row); lv_label_set_text(s_ui.food_detail_quantity,qty);
+            lv_label_set_text(s_ui.food_detail_status,online?"已同步 · 屏幕只读":"离线缓存 · 屏幕只读");
+        } else {
+            lv_label_set_text(s_ui.food_detail_name,"食材已删除或尚未同步");
+            lv_label_set_text(s_ui.food_detail_quantity,""); lv_label_set_text(s_ui.food_detail_status,"");
+        }
+    }
+}
+
 static void create_inventory(void)
 {
-    s_ui.inventory = lv_obj_create(NULL);
-    prepare_screen(s_ui.inventory, SHIYU_COLOR_BACKGROUND);
-    lv_obj_t *back = make_button(s_ui.inventory, 40, 32, 132, 56,
-                                 SHIYU_COLOR_SURFACE, "<  返回");
-    lv_obj_add_event_cb(back, on_back_home, LV_EVENT_CLICKED, NULL);
-    make_label(s_ui.inventory, "家里的食材", 48, 124,
-               SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    s_ui.inventory_context = make_label(s_ui.inventory, "查看家里的食材 [DEMO]", 48, 174,
-                                        SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-
-    lv_obj_t *tomato = make_card(s_ui.inventory, 48, 228, 440, 148,
-                                 SHIYU_COLOR_WARNING);
-    lv_obj_add_flag(tomato, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(tomato, on_food_detail, LV_EVENT_CLICKED,
-                        (void *)&FOOD_ITEM_TOMATO);
-    make_label(tomato, "番茄", 28, 24, SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(tomato, "临期提醒", 28, 76, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(tomato, "查看食材", 284, 76, SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-
-    s_ui.inventory_milk = make_card(s_ui.inventory, 512, 228, 464, 148,
-                                    SHIYU_COLOR_SURFACE);
-    lv_obj_add_flag(s_ui.inventory_milk, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_ui.inventory_milk, on_food_detail, LV_EVENT_CLICKED,
-                        (void *)&FOOD_ITEM_MILK);
-    make_label(s_ui.inventory_milk, "牛奶", 28, 24,
-               SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(s_ui.inventory_milk, "已有", 28, 76,
-               SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(s_ui.inventory_milk, "查看食材", 308, 76,
-               SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-
-    make_label(s_ui.inventory, "[DEMO]  手机管理食材", 48, 430,
-               SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    make_label(s_ui.inventory, "60 秒无操作后进入环境模式", 48, 542,
-               SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    ESP_LOGI(TAG, "Created transient INVENTORY");
-    log_memory("inventory-created");
+    s_ui.inventory=lv_obj_create(NULL);
+    prepare_screen(s_ui.inventory,SHIYU_COLOR_BACKGROUND);
+    lv_obj_t *back=make_button(s_ui.inventory,40,32,132,56,SHIYU_COLOR_SURFACE,"<  返回");
+    lv_obj_add_event_cb(back,on_back_home,LV_EVENT_CLICKED,NULL);
+    make_label(s_ui.inventory,"家里的食材",48,124,SHIYU_COLOR_PRIMARY,UI_FONT_TITLE);
+    s_ui.inventory_context=make_label(s_ui.inventory,"等待同步",48,174,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    s_stock_list=lv_obj_create(s_ui.inventory);
+    lv_obj_set_pos(s_stock_list,48,218); lv_obj_set_size(s_stock_list,928,258);
+    lv_obj_set_style_pad_all(s_stock_list,0,0); lv_obj_set_style_border_width(s_stock_list,0,0);
+    lv_obj_set_style_bg_opa(s_stock_list,LV_OPA_TRANSP,0); lv_obj_remove_flag(s_stock_list,LV_OBJ_FLAG_SCROLLABLE);
+    if(!s_stock_rows) s_stock_rows=heap_caps_calloc(4,sizeof(*s_stock_rows),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    lv_obj_t *previous=make_button(s_ui.inventory,48,504,160,52,SHIYU_COLOR_SURFACE,"<");
+    lv_obj_add_event_cb(previous,stock_page_change,LV_EVENT_CLICKED,(void *)(intptr_t)-1);
+    s_stock_page_label=make_label(s_ui.inventory,"1 / 1",460,516,SHIYU_COLOR_SECONDARY,UI_FONT_BODY);
+    lv_obj_t *next=make_button(s_ui.inventory,816,504,160,52,SHIYU_COLOR_SURFACE,">");
+    lv_obj_add_event_cb(next,stock_page_change,LV_EVENT_CLICKED,(void *)(intptr_t)1);
+    refresh_inventory_ui(true);
 }
 
 static void create_food_detail(void)
@@ -724,18 +750,19 @@ static void create_food_detail(void)
     lv_obj_t *back = make_button(s_ui.food_detail, 40, 32, 132, 56,
                                  SHIYU_COLOR_SURFACE, "<  返回");
     lv_obj_add_event_cb(back, on_back_inventory, LV_EVENT_CLICKED, NULL);
-    make_label(s_ui.food_detail, "查看食材 [DEMO]", 48, 124,
+    make_label(s_ui.food_detail, "家里的食材", 48, 124,
                SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
 
     lv_obj_t *detail = make_card(s_ui.food_detail, 48, 194, 928, 240,
                                  SHIYU_COLOR_SURFACE);
-    s_ui.food_detail_name = make_label(detail, "番茄", 32, 28,
-                                       SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    s_ui.food_detail_quantity = make_label(detail, "已有 3", 32, 84,
+    s_ui.food_detail_name = make_label(detail, "", 32, 28,
+                                       SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
+    lv_obj_set_width(s_ui.food_detail_name,850);
+    s_ui.food_detail_quantity = make_label(detail, "", 32, 112,
                                            SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
-    s_ui.food_detail_status = make_label(detail, "临期提醒", 32, 138,
+    s_ui.food_detail_status = make_label(detail, "", 32, 174,
                                          SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
-    make_label(detail, "手机管理食材", 636, 138, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
+    make_label(detail, "手机管理食材", 636, 174, SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
 
     lv_obj_t *meal_button = make_button(s_ui.food_detail, 48, 470, 260, 58,
                                         SHIYU_COLOR_ACCENT, "今晚吃什么");
@@ -760,7 +787,7 @@ static void create_meal(void)
                                          SHIYU_COLOR_SURFACE);
     make_label(recommendation, "番茄炒蛋", 32, 28,
                SHIYU_COLOR_PRIMARY, UI_FONT_TITLE);
-    make_label(recommendation, "家中已有 3 种所需食材", 32, 86,
+    make_label(recommendation, "[DEMO] 示例菜单，未接入库存匹配", 32, 86,
                SHIYU_COLOR_SECONDARY, UI_FONT_BODY);
     make_label(recommendation, "配一碗热米饭", 32, 142,
                SHIYU_COLOR_PRIMARY, UI_FONT_BODY);
@@ -1171,6 +1198,7 @@ void shiyu_ui_create(shiyu_ui_action_cb_t start_network_scan,
     create_home();
     create_settings();
     create_ambient();
+    refresh_inventory_ui(true);
     lv_timer_create(on_state_timer, SHIYU_STATE_CHECK_PERIOD_MS, NULL);
     show_active(SCREEN_HOME);
     log_memory("resident-ui-created");

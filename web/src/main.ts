@@ -3,6 +3,7 @@ import { parseInvite, buildInviteUrl, invitationState, INVITE_STORAGE_KEY } from
 import './style.css';
 import { mountPhotos } from './photos';
 import { mountDevices } from './devices';
+import { mountInventory } from './inventory';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const url = import.meta.env.VITE_SUPABASE_URL?.trim();
@@ -42,7 +43,7 @@ function readableError(error: unknown) {
   if (code === 'over_email_send_rate_limit' || code === 'over_request_rate_limit') return '发送过于频繁，请稍后重试。';
   if (code === 'email_address_not_authorized') return '邮件服务尚未开放此邮箱，请联系维护者配置邮件发送服务。';
   if (code === '22023') return '邀请不可用：可能已过期、已使用，或当前账号已有厨房。';
-  if (code === 'P0001') return '当前厨房已有成员、照片或设备，无法切换。原厨房和邀请均保留。';
+  if (code === 'P0001') return '当前厨房已有成员、库存、照片或设备，无法切换。原厨房和邀请均保留。';
   if (code === '42501') return '当前账号没有此操作权限。';
   if (code === 'PGRST202' || code === '42P01') return '后端接口尚未就绪，请先完成数据库迁移。';
   return '操作未完成，请检查网络后重试。';
@@ -56,6 +57,7 @@ if (!url || !key || !/^https?:\/\//.test(url) || key.startsWith('sb_secret_')) {
   let busy = false;
   let sentEmail = '';
   let disposePhotos: (() => void) | undefined;
+  let disposeInventory: (() => void) | undefined;
 
   async function run(button: HTMLButtonElement, task: () => Promise<void>) {
     if (busy) return;
@@ -91,6 +93,7 @@ if (!url || !key || !/^https?:\/\//.test(url) || key.startsWith('sb_secret_')) {
   }
   async function dashboard() {
     disposePhotos?.(); disposePhotos = undefined;
+    disposeInventory?.(); disposeInventory = undefined;
     const currentGeneration = ++generation;
     const currentSession = session;
     if (!currentSession) { login(); return; }
@@ -117,9 +120,9 @@ if (!url || !key || !/^https?:\/\//.test(url) || key.startsWith('sb_secret_')) {
       } else {
         invite.append(el('h3', `加入「${preview.household_name}」`), el('p', `有效期至 ${new Date(preview.expires_at).toLocaleString('zh-CN')}`));
         if (!preview.can_join) {
-          invite.append(el('p', '当前账号已属于一个厨房，厨房中有其他成员、照片或绑定设备时不能切换。请保留现有数据，或退出登录后更换账号。'));
+          invite.append(el('p', '当前账号已属于一个厨房，厨房中有其他成员、库存、照片或绑定设备时不能切换。请保留现有数据，或退出登录后更换账号。'));
         } else {
-          if (preview.switch_required) invite.append(el('p', '当前厨房仅有你自己，且没有照片或绑定设备。确认后将删除这个空厨房及其邀请，并加入家人的厨房。'));
+          if (preview.switch_required) invite.append(el('p', '当前厨房仅有你自己，且没有库存、照片或绑定设备。确认后将删除这个空厨房及其邀请，并加入家人的厨房。'));
           const accept = action(preview.switch_required ? '确认删除空厨房并加入' : '确认加入厨房', () => {
             if (preview.switch_required && !confirm('确定删除当前空厨房及其邀请，并加入家人的厨房吗？此操作不能撤销。')) return;
             void run(accept, async () => {
@@ -148,10 +151,13 @@ if (!url || !key || !/^https?:\/\//.test(url) || key.startsWith('sb_secret_')) {
         if (createError) throw createError; message('厨房已创建。'); await dashboard();
       })); form.append(create); form.addEventListener('submit', event => { event.preventDefault(); create.click(); }); setup.append(form); return;
     }
+    const inventory = el('section'); content.append(inventory);
+    disposeInventory = mountInventory(inventory, client, kitchen.id,
+      () => generation === currentGeneration && session?.user.id === currentSession.user.id);
     const photos = el('section'); content.append(photos);
     disposePhotos = mountPhotos(photos, client, kitchen.id, currentSession.user.id,
       () => generation === currentGeneration && session?.user.id === currentSession.user.id);
-    content.append(el('p', '食材管理和屏幕同步将在后续接入。', 'muted'));
+
     if (kitchen.owner_id === currentSession.user.id) {
       const inviteButton = action('邀请家人加入', () => void run(inviteButton, async () => {
         const { data: token, error: inviteError } = await client.rpc('create_invitation');

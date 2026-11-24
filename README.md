@@ -6,10 +6,10 @@
 
 - `firmware/shiyu_idf/`：当前目标固件；30MHz + DOUBLE_PARTIAL 双 framebuffer 已获用户显示与切页确认。
 - `supabase/`：数据库迁移、权限策略与服务端函数骨架。
-- `web/`：手机网页端骨架，尚未实现运行页面。
+- `web/`：手机网页端；登录、邀请、照片、设备及库存入口见 `web/README.md`。
 - [后端实施入口](docs/backend/README.md)：数据边界、权限和首阶段验收。
 
-后端当前仅完成仓库目录与配置模板，尚未部署。下方无线传图说明为早期 Arduino MVP 历史记录，不代表当前 IDF 的产品入口。
+后端当前状态见 [后端实施入口](docs/backend/README.md)。下方无线传图说明为早期 Arduino MVP 历史记录，不代表当前 IDF 的产品入口。
 
 ## 历史 Arduino MVP 已实现
 

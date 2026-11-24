@@ -11,6 +11,7 @@
 
 #include "rgb_lcd_port.h"
 #include "photo_storage.h"
+#include "inventory_model.h"
 #include "ui_controller.h"
 #include "wifi_manager.h"
 #include "cloud_sync.h"
@@ -168,6 +169,7 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(photo_storage_init() ? ESP_OK : ESP_FAIL);
+    ESP_ERROR_CHECK(inventory_model_init() ? ESP_OK : ESP_FAIL);
     const esp_lv_adapter_rotation_t rotation = ESP_LV_ADAPTER_ROTATE_0;
     const esp_lv_adapter_tear_avoid_mode_t tear_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_PARTIAL;
     esp_lcd_panel_handle_t panel_handle = NULL;

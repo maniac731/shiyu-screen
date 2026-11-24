@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "ui_controller.c" "photo_storage.c" "wifi_manager.c" "cloud_sync.c" "carousel_settings.c"
+    SRCS "main.c" "ui_controller.c" "photo_storage.c" "wifi_manager.c" "cloud_sync.c" "inventory_model.c" "carousel_settings.c"
          "fonts/shiyu_font_28.c" "fonts/shiyu_font_cjk_24.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
